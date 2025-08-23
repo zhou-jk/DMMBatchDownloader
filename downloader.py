@@ -124,7 +124,9 @@ def create_default_config(file_path: str):
     }
     default_config['Network'] = {
         'user_agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-        'cookie': 'age_check_done=1; ; INT_SESID=YOUR-SESSION-ID; licenseUID=YOUR-LICENSE-ID'
+        'cookie': 'age_check_done=1; ; INT_SESID=YOUR-SESSION-ID; licenseUID=YOUR-LICENSE-ID',
+        'http_proxy': '',
+        'https_proxy': ''
     }
     default_config['Settings'] = {
         'max_retries': '3',
@@ -465,13 +467,13 @@ def check_disk_space(path: str, required_gb: float = 30.0) -> bool:
 def make_request(method: str, url: str, headers: Dict,
                  max_retries: int, retry_delay: int, cid_context: str,
                  allow_redirects: bool = True, data: Optional[Dict] = None,
-                 stream: bool = False, timeout: int = 30) -> Optional[requests.Response]:
+                 stream: bool = False, timeout: int = 30, proxies: Optional[Dict] = None) -> Optional[requests.Response]:
     """Makes an HTTP request with retry logic."""
     for attempt in range(max_retries):
         try:
             response = requests.request(
                 method, url, headers=headers, data=data, timeout=timeout,
-                allow_redirects=allow_redirects, stream=stream
+                allow_redirects=allow_redirects, stream=stream, proxies=proxies
             )
             response.raise_for_status()
             return response
@@ -499,7 +501,7 @@ def make_request(method: str, url: str, headers: Dict,
 # ---------------- CORE FUNCTIONALITY ----------------
 
 def get_movie_count(cid: str, headers: Dict,
-                    max_retries: int, retry_delay: int) -> int:
+                    max_retries: int, retry_delay: int, proxies: Optional[Dict] = None) -> int:
     """Requests the JSON playlist and returns the number of parts. Returns -1 on failure."""
     url = 'https://www.dmm.co.jp/service/digitalapi/-/html5/'
     postdata = {
@@ -508,7 +510,7 @@ def get_movie_count(cid: str, headers: Dict,
         "adult_flag": "1"
     }
     cid_context = f"API movie count for {cid}"
-    response = make_request("POST", url, headers, max_retries, retry_delay, cid_context, data=postdata)
+    response = make_request("POST", url, headers, max_retries, retry_delay, cid_context, data=postdata, proxies=proxies)
 
     if response:
         try:
@@ -530,11 +532,11 @@ def get_movie_count(cid: str, headers: Dict,
         return -1
 
 def get_online_cid(cid: str, headers: Dict,
-                   max_retries: int, retry_delay: int) -> Optional[str]:
+                   max_retries: int, retry_delay: int, proxies: Optional[Dict] = None) -> Optional[str]:
     """Retrieves the online ID ('品番') by parsing the video page."""
     url = f'https://www.dmm.co.jp/monthly/premium/-/detail/=/cid={cid}/'
     cid_context = f"Online CID page for {cid}"
-    response = make_request("GET", url, headers, max_retries, retry_delay, cid_context)
+    response = make_request("GET", url, headers, max_retries, retry_delay, cid_context, proxies=proxies)
 
     if response:
         try:
@@ -566,14 +568,14 @@ def get_online_cid(cid: str, headers: Dict,
 
 def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
                       headers_main: Dict, headers_download: Dict,
-                      max_retries: int, retry_delay: int, config: configparser.ConfigParser) -> Optional[str]:
+                      max_retries: int, retry_delay: int, config: configparser.ConfigParser, proxies: Optional[Dict] = None) -> Optional[str]:
     """Gets the redirect location and downloads the .dcv file with a progress bar."""
     logging.info(f"Requesting download location for {cid_part_label}...")
     location = None
     cid_context_loc = f"Download location for {cid_part_label}"
 
     response_loc = make_request("GET", download_url, headers_main, max_retries, retry_delay,
-                                cid_context_loc, allow_redirects=False, timeout=60)
+                                cid_context_loc, allow_redirects=False, timeout=60, proxies=proxies)
 
     if response_loc and 300 <= response_loc.status_code < 400:
         location = response_loc.headers.get('Location')
@@ -601,7 +603,7 @@ def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
         # Download from content delivery network (e.g., stcXXX.dmm.com)
         cid_context_dl = f"File download for {cid_part_label}"
         r_dl = make_request("GET", location, headers_download, max_retries, retry_delay,
-                            cid_context_dl, stream=True, timeout=300)
+                            cid_context_dl, stream=True, timeout=300, proxies=proxies)
         if not r_dl:
             return None
 
@@ -650,7 +652,7 @@ def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
 
 
 def fetch_and_download_parts(cid: str, config: configparser.ConfigParser,
-                             headers_main: Dict, headers_download: Dict) -> Tuple[Optional[List[str]], Optional[int]]:
+                             headers_main: Dict, headers_download: Dict, proxies: Optional[Dict] = None) -> Tuple[Optional[List[str]], Optional[int]]:
     """Fetches page details, determines parts, and downloads them."""
     paths = config['Paths']
     settings = config['Settings']
@@ -661,7 +663,7 @@ def fetch_and_download_parts(cid: str, config: configparser.ConfigParser,
     page_url = f'https://www.dmm.co.jp/monthly/premium/-/detail/=/cid={cid}/'
     logging.info(f"Processing ID {cid}: Fetching page details from {page_url}")
     cid_context_page = f"Main page for {cid}"
-    response_page = make_request("GET", page_url, headers_main, max_retries, retry_delay, cid_context_page)
+    response_page = make_request("GET", page_url, headers_main, max_retries, retry_delay, cid_context_page, proxies=proxies)
 
     if not response_page:
         logging.error(f"Failed to access main page for ID {cid}. Skipping.")
@@ -685,12 +687,12 @@ def fetch_and_download_parts(cid: str, config: configparser.ConfigParser,
         logging.exception(f"Error parsing bitrate for ID {cid}")
         return None, None
 
-    online_cid = get_online_cid(cid, headers_main, max_retries, retry_delay)
+    online_cid = get_online_cid(cid, headers_main, max_retries, retry_delay, proxies)
     if not online_cid:
         logging.warning(f"Could not determine online CID for {cid}. Using original ID {cid} for API calls.")
         online_cid = cid
 
-    parts_count = get_movie_count(online_cid, headers_main, max_retries, retry_delay)
+    parts_count = get_movie_count(online_cid, headers_main, max_retries, retry_delay, proxies)
     if parts_count == -1:
         logging.error(f"Unable to retrieve the number of parts for ID: {cid} (using online ID: {online_cid}). Skipping download.")
         return None, None
@@ -745,7 +747,7 @@ def fetch_and_download_parts(cid: str, config: configparser.ConfigParser,
         downloaded_file_path = download_dcv_file(
             part_download_url, download_dir, cid_part_label,
             headers_main, headers_download,
-            safe_max_retries, safe_retry_delay, config
+            safe_max_retries, safe_retry_delay, config, proxies
         )
 
         if downloaded_file_path:
@@ -962,7 +964,7 @@ def decrypt_and_verify(cid: str, downloaded_files: List[str], expected_parts: in
 
 def process_video_id(cid: str, config: configparser.ConfigParser,
                      headers_main: Dict, headers_download: Dict,
-                     decrypt_tool_path: str):
+                     decrypt_tool_path: str, proxies: Optional[Dict] = None):
     """Processes a single video ID through all phases."""
     logging.info(f"=== Processing ID: {cid} ===")
     failure_occurred = False
@@ -991,7 +993,7 @@ def process_video_id(cid: str, config: configparser.ConfigParser,
 
     try:
         # Phase 1: Download
-        downloaded_files, parts_count = fetch_and_download_parts(cid, config, headers_main, headers_download)
+        downloaded_files, parts_count = fetch_and_download_parts(cid, config, headers_main, headers_download, proxies)
 
         is_download_phase_ok = False
         if downloaded_files is None:
@@ -1133,6 +1135,17 @@ def main():
     headers_download = {
         'User-Agent': network['user_agent']
     }
+    
+    # Set up proxy configuration
+    proxies = {}
+    if network.get('http_proxy', '').strip():
+        proxies['http'] = network['http_proxy'].strip()
+    if network.get('https_proxy', '').strip():
+        proxies['https'] = network['https_proxy'].strip()
+    if proxies:
+        logging.info(f"Using proxy configuration: {proxies}")
+    else:
+        proxies = None
 
     ids_file_path = paths['ids_file']
     try:
@@ -1155,7 +1168,7 @@ def main():
     for i, cid in enumerate(original_ids):
         try:
             logging.info(f"--- Starting ID {i+1}/{len(original_ids)}: {cid} ---")
-            process_video_id(cid, config, headers_main, headers_download, decrypt_tool_path)
+            process_video_id(cid, config, headers_main, headers_download, decrypt_tool_path, proxies)
 
             if i < len(original_ids) - 1 and pause_between is not None and pause_between > 0:
                 logging.debug(f"Pausing for {pause_between} seconds before next ID...")

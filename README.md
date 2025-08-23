@@ -13,6 +13,7 @@ A Python script for automatically downloading and decrypting videos from DMM. Th
 - **Comprehensive Logging**: Detailed logs for debugging and monitoring
 - **Disk Space Monitoring**: Prevents downloads when insufficient space is available
 - **Failed ID Tracking**: Automatically tracks and moves failed downloads
+- **HTTP Proxy Support**: Works through proxy servers
 
 ## Prerequisites
 
@@ -85,6 +86,8 @@ failed_ids_file = failed_ids.txt     # Failed IDs tracking file
 ```ini
 user_agent = Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html) #Don't touch this, it's required to bypass VPN requirement.
 cookie = age_check_done=1; INT_SESID=YOUR-SESSION-ID; licenseUID=YOUR-LICENSE-ID  # **IMPORTANT: Replace with your actual DMM cookie values**
+http_proxy =                         # HTTP proxy server (optional) - e.g., http://proxy.company.com:8080
+https_proxy =                        # HTTPS proxy server (optional) - e.g., https://proxy.company.com:8080
 ```
 
 #### [Settings] Section
@@ -198,6 +201,12 @@ project/
 - Verify DMM website accessibility
 - Try increasing retry delays in configuration
 
+**"Proxy connection issues"**
+- Verify proxy server address and port are correct
+- Check if proxy requires authentication (username/password)
+- Test proxy connectivity outside the script first
+- Try different proxy servers if available
+
 **"Decryption failures"**
 - Ensure jav-it.exe has proper permissions
 - Check that DECRYPT.MOD is the correct version
@@ -231,6 +240,7 @@ project/
 - Disk space monitoring and prevention
 - Failed ID tracking and organization
 - Progress bars for download monitoring
+- HTTP/HTTPS proxy support
 
 ## Support
 
