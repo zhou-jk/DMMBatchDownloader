@@ -24,7 +24,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Tuple, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -701,7 +701,7 @@ def process_integrated_task(task: IntegratedTask) -> bool:
             ThreadSafeLogger.debug(f"Using temporary directory: {temp_dir}")
             
             # Check disk space
-            if not check_disk_space(temp_dir, 20.0):
+            if not check_disk_space(temp_dir, 10.0):
                 ThreadSafeLogger.error(f"Insufficient disk space in temporary directory for ID {cid}")
                 task.error_message = "Insufficient disk space"
                 update_processing_stats('fail_download')
@@ -953,7 +953,7 @@ def main():
         completed_durations = [(task.end_time - task.start_time) for task in successful_tasks 
                               if task.start_time and task.end_time]
         if completed_durations:
-            avg_duration = sum(completed_durations, datetime.timedelta(0)) / len(completed_durations)
+            avg_duration = sum(completed_durations, timedelta(0)) / len(completed_durations)
             print(f"  - Average processing time per ID: {avg_duration}")
     
     ThreadSafeLogger.info(f"Integrated processing finished. Success: {len(successful_tasks)}, Failed: {len(failed_tasks)}")
