@@ -1,19 +1,42 @@
-# DMM Batch Downloader
+# DMM Batch Downloader & Processor Suite
 
-A Python script for automatically downloading and decrypting videos from DMM. This tool handles the complete workflow from downloading encrypted `.dcv` files to producing decrypted `.mkv` files ready for playback.
+A comprehensive Python toolkit for automatically downloading, decrypting, and processing videos from DMM. This suite includes multiple scripts for different workflows, from basic downloading to complete automated processing with cloud storage integration.
+
+## Available Scripts
+
+### 1. **downloader.py** - Basic Download & Decrypt
+Single-threaded script that downloads and decrypts videos sequentially.
+
+### 2. **batch_downloader.py** - Multi-threaded Downloader
+Downloads `.dcv` files from DMM using multiple concurrent threads.
+
+### 3. **batch_decryptor.py** - Multi-threaded Decryptor  
+Decrypts `.dcv` files to `.mkv` format using multiple concurrent threads.
+
+### 4. **rclone_decrypt_processor.py** - Remote Processing
+Downloads `.dcv` files from rclone remote, decrypts locally, and uploads back.
+
+### 5. **integrated_processor.py** - Complete Automated Pipeline ⭐
+**RECOMMENDED**: All-in-one solution that combines downloading, decrypting, and uploading in a single multi-threaded workflow.
+
+### 6. **run.py** - Interactive Script Launcher
+User-friendly launcher that helps you choose the right script for your needs with descriptions and guidance.
 
 ## Features
 
 - **Batch Processing**: Process multiple video IDs from a text file
+- **Multi-threaded Processing**: Concurrent download, decryption, and upload operations
 - **Multi-part Support**: Automatically handles videos split into multiple parts
 - **Quality Selection**: Downloads videos in the highest available quality (including 4K)
 - **Robust Error Handling**: Comprehensive retry logic and error recovery
 - **File Verification**: Validates downloads using MediaInfo (size, duration, conformance checks)
-- **Progress Tracking**: Real-time download progress bars
+- **Progress Tracking**: Real-time progress monitoring and statistics
 - **Comprehensive Logging**: Detailed logs for debugging and monitoring
-- **Disk Space Monitoring**: Prevents downloads when insufficient space is available
+- **Disk Space Monitoring**: Prevents operations when insufficient space is available
 - **Failed ID Tracking**: Automatically tracks and moves failed downloads
 - **HTTP Proxy Support**: Works through proxy servers
+- **Cloud Storage Integration**: Automatic upload to rclone remotes
+- **Temporary File Management**: Efficient cleanup of intermediate files
 
 ## Prerequisites
 
@@ -123,26 +146,80 @@ Create an `ids.txt` file with one video ID per line:
 1sdde00304
 ```
 
-### Running the Script
+### Running the Scripts
+
+#### Interactive Script Launcher (Easiest)
+
+Use the interactive launcher to choose the best script for your needs:
 
 ```bash
-python downloader.py
+python run.py
 ```
 
-The script will:
+This will show you all available scripts with descriptions and help you select the right one.
+
+#### Direct Script Execution
+
+##### Integrated Processor (Recommended)
+
+For the complete automated workflow:
+
+```bash
+python integrated_processor.py
+```
+
+This will perform the complete pipeline:
 1. **Check dependencies** and validate configuration
-2. **Process each ID** in `ids.txt` sequentially
-3. **Download** encrypted `.dcv` files
+2. **Process each ID** with multi-threading
+3. **Download** encrypted `.dcv` files to temporary directory
 4. **Decrypt** to `.mkv` format with verification
-5. **Clean up** temporary files on success
-6. **Move failed files** to the failed directory
-7. **Log all operations** for monitoring
+5. **Upload** to rclone remote storage
+6. **Clean up** temporary files automatically
+7. **Track failed IDs** and provide detailed progress
+
+##### Individual Scripts
+
+For specific operations:
+
+```bash
+# Download only
+python batch_downloader.py
+
+# Decrypt only (processes existing .dcv files)
+python batch_decryptor.py
+
+# Basic single-threaded workflow
+python downloader.py
+
+# Remote processing via rclone
+python rclone_decrypt_processor.py
+```
 
 ### Output Structure
 
+#### Integrated Processor Workflow
+
 ```
 project/
-├── downloaded/           # Temporary .dcv files (auto-cleaned on success)
+├── ids.txt              # Input IDs to process
+├── process_all.log      # Complete operation log
+├── process_errors.log   # Error-only log
+├── failed_ids.txt       # List of failed IDs
+└── config.ini          # Configuration file
+
+# Temporary files (auto-cleaned):
+/tmp/integrated_<cid>_*/  # Temporary processing directories
+
+# Remote storage (configured via rclone):
+remote:/tmp/DecryptedVideos/  # Final .mkv files uploaded here
+```
+
+#### Individual Scripts Workflow
+
+```
+project/
+├── downloaded/           # Temporary .dcv files (batch_downloader)
+├── dcv_files/           # .dcv files for batch_decryptor input
 ├── DecryptedVideos/     # Final .mkv files (configured location)
 ├── FailedVideos/        # Failed downloads organized by ID
 │   └── 1sdde00301/     # Failed files for specific ID
@@ -214,11 +291,24 @@ project/
 - Be sure to have jav-it enviroment variables for DMM decryption
 - Check available disk space
 
+**"Rclone upload failures"** (integrated_processor.py only)
+- Verify rclone is installed and accessible from PATH
+- Test rclone configuration: `rclone config show`
+- Check remote storage authentication and permissions
+- Verify remote path exists and is writable
+- Test connectivity: `rclone lsf remote:path`
+
 **"Size/Duration mismatches"**
 - Usually indicates incomplete downloads or decryption failures
 - Check network stability
 - Verify sufficient disk space
 - Review logs for specific error details
+
+**"Integrated processor performance issues"**
+- Reduce concurrent threads in config if system is overwhelmed
+- Monitor system resources (CPU, RAM, network bandwidth)
+- Check temporary directory space (integrated processor uses /tmp)
+- Consider using individual scripts for troubleshooting specific phases
 
 ### Advanced Troubleshooting
 
@@ -228,9 +318,36 @@ project/
 4. **Test individual components** (MediaInfo, FFmpeg, jav-it.exe)
 5. **Update dependencies** if issues persist
 
+## Script Comparison
+
+| Feature | downloader.py | batch_downloader.py | batch_decryptor.py | integrated_processor.py |
+|---------|---------------|--------------------|--------------------|------------------------|
+| Multi-threading | ❌ | ✅ | ✅ | ✅ |
+| Download | ✅ | ✅ | ❌ | ✅ |
+| Decrypt | ✅ | ❌ | ✅ | ✅ |
+| Upload to Remote | ❌ | ❌ | ❌ | ✅ |
+| Temporary Files | Manual cleanup | Manual cleanup | Manual cleanup | Auto cleanup |
+| Memory Usage | Low | Medium | Medium | Medium |
+| Processing Speed | Slow | Fast | Fast | Fastest |
+| Disk Usage | High | High | High | Low |
+| Complete Workflow | ✅ | ❌ | ❌ | ✅ |
+
+### Integrated Processor Advantages
+
+1. **Memory Efficient**: Uses temporary directories that are automatically cleaned
+2. **Fastest Overall**: Parallel processing of download, decrypt, and upload phases
+3. **Space Saving**: No intermediate file storage on local disk
+4. **Cloud Ready**: Direct upload to remote storage (Google Drive, OneDrive, etc.)
+5. **Fault Tolerant**: Individual task failures don't affect other tasks
+6. **Progress Monitoring**: Real-time statistics across all processing phases
+
 ## Changelog
 
 ### Current Version Features
+- **NEW**: Integrated processor with complete automated pipeline
+- **NEW**: Multi-threaded download, decryption, and upload workflow
+- **NEW**: Rclone integration for cloud storage uploads
+- **NEW**: Temporary file management with automatic cleanup
 - Support for DMM Premium subscription
 - Multi-part video support with automatic detection
 - Advanced file verification using MediaInfo
