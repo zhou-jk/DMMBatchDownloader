@@ -170,6 +170,12 @@ def create_default_config(file_path: str):
         'download_threads': '3',
         'decrypt_threads': '2'
     }
+    default_config['Rclone'] = {
+        'rclone_executable': 'rclone',
+        'remote_name': 'remote',
+        'remote_dcv_path': '/root/jav-it/downloaded',
+        'remote_mkv_path': '/tmp/DecryptedVideos'
+    }
     try:
         with open(file_path, 'w', encoding='utf-8') as configfile:
             default_config.write(configfile)
@@ -234,6 +240,17 @@ def validate_configuration(config: configparser.ConfigParser):
     except Exception as e:
          errors.append(f"Unexpected error validating [Settings]: {e}")
 
+    try:
+        rclone_required = ['rclone_executable', 'remote_name', 'remote_dcv_path', 'remote_mkv_path']
+        for key in rclone_required:
+            if not config.get('Rclone', key, fallback='').strip():
+                errors.append(f"[Rclone] '{key}': Value cannot be empty.")
+
+    except configparser.NoOptionError as e:
+        errors.append(f"Missing required option in [Rclone]: {e.option}")
+    except Exception as e:
+         errors.append(f"Unexpected error validating [Rclone]: {e}")
+
     if errors:
         error_message = f"Configuration validation failed ({CONFIG_FILE}):\n" + "\n".join(f"- {e}" for e in errors)
         raise ValueError(error_message)
@@ -250,7 +267,7 @@ def load_configuration(file_path: str) -> configparser.ConfigParser:
     config = configparser.ConfigParser(interpolation=None)
     try:
         config.read(file_path, encoding='utf-8')
-        required_sections = ['Paths', 'Network', 'Settings']
+        required_sections = ['Paths', 'Network', 'Settings', 'Rclone']
         for section in required_sections:
             if section not in config:
                 raise ValueError(f"Missing required section [{section}] in {file_path}")
