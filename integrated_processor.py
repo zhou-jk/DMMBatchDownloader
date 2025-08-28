@@ -866,9 +866,8 @@ def main():
     print_processing_progress()
     
     # Get thread count from configuration
-    # For integrated processing, we use fewer threads due to the intensity of the workflow
     max_workers = min(settings.getint('decrypt_threads', fallback=2), 
-                     settings.getint('download_threads', fallback=3) // 2)
+                     settings.getint('download_threads', fallback=2))
     max_workers = max(1, max_workers)  # Ensure at least 1 thread
     
     ThreadSafeLogger.info(f"Starting integrated processing with {max_workers} concurrent threads.")
