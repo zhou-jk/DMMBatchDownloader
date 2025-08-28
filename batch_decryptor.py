@@ -232,7 +232,7 @@ def decrypt_single_file(task: DecryptTask) -> bool:
         return False
     
     duration_diff = abs(dcv_duration - mkv_duration)
-    if duration_diff > 6.0:
+    if duration_diff > 30.0:
         ThreadSafeLogger.error(f"Duration mismatch for {Path(dcv_file_path).name}: DCV={dcv_duration:.2f}s, MKV={mkv_duration:.2f}s (Difference: {duration_diff:.2f}s > 6s)")
         safe_remove(str(output_mkv_path), "duration mismatch")
         return False

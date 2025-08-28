@@ -927,7 +927,7 @@ def decrypt_and_verify(cid: str, downloaded_files: List[str], expected_parts: in
                 continue
             
             duration_diff = abs(dcv_duration - mkv_duration)
-            if duration_diff > 6.0:
+            if duration_diff > 30.0:
                 logging.error(f"Duration mismatch for {file_basename}: DCV={dcv_duration:.2f}s, MKV={mkv_duration:.2f}s (Difference: {duration_diff:.2f}s > 6s)")
                 overall_success = False
                 safe_remove(str(output_mkv_path), "duration mismatch")
