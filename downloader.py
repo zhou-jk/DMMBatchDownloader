@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -124,14 +125,14 @@ def create_default_config(file_path: str):
     }
     default_config['Network'] = {
         'user_agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-        'cookie': 'age_check_done=1; ; INT_SESID=YOUR-SESSION-ID; licenseUID=YOUR-LICENSE-ID',
-        'http_proxy': '',
-        'https_proxy': ''
+        'cookie': 'age_check_done=1; example_key=example_value', # Simpler cookie value
+        'http_proxy': '',  # Proxy support re-added
+        'https_proxy': '' # Proxy support re-added
     }
     default_config['Settings'] = {
         'max_retries': '3',
         'retry_delay_seconds': '5',
-        'decrypt_retry_delay_seconds': '100',
+        'decrypt_retry_delay_seconds': '100', # Set to 100 as requested
         'pause_between_ids': '2'
     }
     try:
@@ -533,32 +534,22 @@ def get_movie_count(cid: str, headers: Dict,
 
 def get_online_cid(cid: str, headers: Dict,
                    max_retries: int, retry_delay: int, proxies: Optional[Dict] = None) -> Optional[str]:
-    """Retrieves the online ID ('品番') by parsing the video page."""
+    """Retrieves the online ID ('item_variant') by parsing the video page JavaScript."""
     url = f'https://www.dmm.co.jp/monthly/premium/-/detail/=/cid={cid}/'
     cid_context = f"Online CID page for {cid}"
     response = make_request("GET", url, headers, max_retries, retry_delay, cid_context, proxies=proxies)
 
     if response:
         try:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            info_div = soup.find("div", {"class": "bx-productInfo"})
-            if isinstance(info_div, Tag):
-                rows = info_div.find_all("tr")
-                for tr in rows:
-                    header_cell = tr.find("th") or (tr.find("td") if tr.find("td") else None) # type: ignore
-                    if header_cell and "品番" in header_cell.get_text(strip=True): # type: ignore
-                        value_cell = header_cell.find_next_sibling("td") # type: ignore
-                        if value_cell:
-                            online_cid = value_cell.get_text(strip=True)
-                            logging.debug(f"Found online CID {online_cid} for {cid}")
-                            return online_cid
-                        else:
-                             logging.warning(f"Found '品番' row for {cid}, but couldn't find the value cell.")
-                             break
-                logging.warning(f"'品番' (Product Number) not found in product info table for {cid}")
+            # Extract item_variant from JavaScript using regex
+            match = re.search(r'item_variant\s*:\s*"([^"]+)"', response.text)
+            if match:
+                item_variant = match.group(1)
+                logging.debug(f"Found item_variant {item_variant} for {cid}")
+                return item_variant
             else:
-                logging.warning(f"Product info div ('bx-productInfo') not found or is not a Tag on page for {cid}")
-            return None
+                logging.warning(f"item_variant not found in JavaScript for {cid}")
+                return None
         except Exception as e:
             logging.exception(f"Error parsing online CID page for {cid}")
             return None
@@ -671,18 +662,32 @@ def fetch_and_download_parts(cid: str, config: configparser.ConfigParser,
 
     try:
         soup = BeautifulSoup(response_page.text, 'lxml')
-        bitrate_select = soup.find('select', id='download_bitrate')
-        selected_option = bitrate_select.find('option', selected=True) if bitrate_select else None # type: ignore
-        if not selected_option and bitrate_select:
-             selected_option = bitrate_select.find("option") # type: ignore
-
-        if not selected_option or not selected_option.get('value'): # type: ignore
-            logging.error(f"Bitrate select element/option not found or has no value for ID: {cid}. Page structure might have changed.")
-            body_start = soup.find('body')
-            logging.debug(f"HTML snippet near bitrate for {cid}: {str(body_start)[:1000] if body_start else 'No body tag found'}")
-            return None, None
-        bitrate = selected_option.get('value') # type: ignore
-        logging.info(f"Found bitrate {bitrate} for ID {cid}")
+        
+        # Get all available bitrate options and select the maximum one
+        options = soup.select('select.js-downloadBitrate option')
+        bitrates = []
+        for opt in options:
+            val = opt.get('value')
+            if val and isinstance(val, str) and val.isdigit():
+                bitrates.append(int(val))
+        
+        if bitrates:
+            max_bitrate = max(bitrates)
+            bitrate = str(max_bitrate)
+            max_option = soup.find('option', {'value': bitrate})
+            resolution_text = max_option.get_text() if max_option else 'N/A'
+            logging.info(f"Found max bitrate {bitrate} ({resolution_text}) for ID {cid}")
+        else:
+            # Fallback for 4k if not in numeric list
+            option_4k = soup.find('option', {'value': '4k'})
+            if option_4k:
+                bitrate = '4k'
+                logging.info(f"Found 4k bitrate for ID {cid}")
+            else:
+                logging.error(f"No valid bitrate options found for ID: {cid}. Page structure might have changed.")
+                body_start = soup.find('body')
+                logging.debug(f"HTML snippet near bitrate for {cid}: {str(body_start)[:1000] if body_start else 'No body tag found'}")
+                return None, None
     except Exception as e:
         logging.exception(f"Error parsing bitrate for ID {cid}")
         return None, None
@@ -792,7 +797,7 @@ def decrypt_and_verify(cid: str, downloaded_files: List[str], expected_parts: in
     except (configparser.NoOptionError, ValueError) as e:
         logging.error(f"Configuration error reading decryption retry settings: {e}. Using defaults (Max Retries: 3, Delay: 10s)")
         max_retries = 3
-        decrypt_retry_delay = 10
+        decrypt_retry_delay = 10 # Default fallback, though config should have 100
 
     is_multipart = expected_parts > 1
     overall_success = True
