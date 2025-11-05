@@ -663,31 +663,40 @@ def fetch_and_download_parts(cid: str, config: configparser.ConfigParser,
     try:
         soup = BeautifulSoup(response_page.text, 'lxml')
         
-        # Get all available bitrate options and select the maximum one
+        # Get all available bitrate options and prioritize 4K
         options = soup.select('select.js-downloadBitrate option')
-        bitrates = []
+        bitrate = None
+        resolution_text = 'N/A'
+        
+        # First, check for 4K options
         for opt in options:
             val = opt.get('value')
-            if val and isinstance(val, str) and val.isdigit():
-                bitrates.append(int(val))
+            text = opt.get_text().lower() if opt.get_text() else ''
+            if val and '4k' in text:
+                bitrate = val
+                resolution_text = opt.get_text()
+                logging.info(f"Found 4K option: {bitrate} ({resolution_text}) for ID {cid}")
+                break
         
-        if bitrates:
-            max_bitrate = max(bitrates)
-            bitrate = str(max_bitrate)
-            max_option = soup.find('option', {'value': bitrate})
-            resolution_text = max_option.get_text() if max_option else 'N/A'
-            logging.info(f"Found max bitrate {bitrate} ({resolution_text}) for ID {cid}")
-        else:
-            # Fallback for 4k if not in numeric list
-            option_4k = soup.find('option', {'value': '4k'})
-            if option_4k:
-                bitrate = '4k'
-                logging.info(f"Found 4k bitrate for ID {cid}")
-            else:
-                logging.error(f"No valid bitrate options found for ID: {cid}. Page structure might have changed.")
-                body_start = soup.find('body')
-                logging.debug(f"HTML snippet near bitrate for {cid}: {str(body_start)[:1000] if body_start else 'No body tag found'}")
-                return None, None
+        # If no 4K found, get the highest numerical bitrate
+        if not bitrate:
+            bitrates = []
+            for opt in options:
+                val = opt.get('value')
+                if val and isinstance(val, str) and val.isdigit():
+                    bitrates.append(int(val))
+            if bitrates:
+                max_bitrate = max(bitrates)
+                bitrate = str(max_bitrate)
+                max_option = soup.find('option', {'value': bitrate})
+                resolution_text = max_option.get_text() if max_option else 'N/A'
+                logging.info(f"Found max bitrate {bitrate} ({resolution_text}) for ID {cid}")
+        
+        if not bitrate:
+            logging.error(f"No valid bitrate options found for ID: {cid}. Page structure might have changed.")
+            body_start = soup.find('body')
+            logging.debug(f"HTML snippet near bitrate for {cid}: {str(body_start)[:1000] if body_start else 'No body tag found'}")
+            return None, None
     except Exception as e:
         logging.exception(f"Error parsing bitrate for ID {cid}")
         return None, None
