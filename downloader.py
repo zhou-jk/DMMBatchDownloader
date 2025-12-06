@@ -662,7 +662,6 @@ def fetch_and_download_parts(cid: str, config: configparser.ConfigParser,
 
     try:
         soup = BeautifulSoup(response_page.text, 'lxml')
-        
         # Get all available bitrate options and prioritize 4K
         options = soup.select('select.js-downloadBitrate option')
         bitrate = None

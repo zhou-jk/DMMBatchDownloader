@@ -1,0 +1,5 @@
+config.ini
+.venv/
+__pycache__/
+ids.txt
+failed_ids.txt
