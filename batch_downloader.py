@@ -5,6 +5,7 @@ Downloads .dcv files from DMM platform with parallel processing support.
 
 import time
 import json
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import List, Tuple, Optional, Dict
@@ -12,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 # Third-party libraries
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup
 from tqdm import tqdm
 
 # Local imports
@@ -108,32 +109,21 @@ def get_movie_count(cid: str, headers: Dict, max_retries: int, retry_delay: int,
         return -1
 
 def get_online_cid(cid: str, headers: Dict, max_retries: int, retry_delay: int, proxies: Optional[Dict] = None) -> Optional[str]:
-    """Retrieve the online ID ('品番') by parsing the video page."""
+    """Retrieve the online ID ('item_variant') by parsing the video page JavaScript."""
     url = f'https://www.dmm.co.jp/monthly/premium/-/detail/=/cid={cid}/'
     cid_context = f"Online CID page for {cid}"
     response = make_request("GET", url, headers, max_retries, retry_delay, cid_context, proxies=proxies)
 
     if response:
         try:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            info_div = soup.find("div", {"class": "bx-productInfo"})
-            if isinstance(info_div, Tag):
-                rows = info_div.find_all("tr")
-                for tr in rows:
-                    header_cell = tr.find("th") or (tr.find("td") if tr.find("td") else None)
-                    if header_cell and "品番" in header_cell.get_text(strip=True):
-                        value_cell = header_cell.find_next_sibling("td")
-                        if value_cell:
-                            online_cid = value_cell.get_text(strip=True)
-                            ThreadSafeLogger.debug(f"Found online CID {online_cid} for {cid}")
-                            return online_cid
-                        else:
-                             ThreadSafeLogger.warning(f"Found '品番' row for {cid}, but couldn't find the value cell.")
-                             break
-                ThreadSafeLogger.warning(f"'品番' (Product Number) not found in product info table for {cid}")
+            match = re.search(r'item_variant\s*:\s*"([^"]+)"', response.text)
+            if match:
+                item_variant = match.group(1)
+                ThreadSafeLogger.debug(f"Found item_variant {item_variant} for {cid}")
+                return item_variant
             else:
-                ThreadSafeLogger.warning(f"Product info div ('bx-productInfo') not found or is not a Tag on page for {cid}")
-            return None
+                ThreadSafeLogger.warning(f"item_variant not found in JavaScript for {cid}")
+                return None
         except Exception as e:
             ThreadSafeLogger.error(f"Error parsing online CID page for {cid}: {e}")
             return None
@@ -249,16 +239,38 @@ def fetch_and_download_parts(task: DownloadTask) -> Tuple[Optional[List[str]], O
 
     try:
         soup = BeautifulSoup(response_page.text, 'lxml')
-        bitrate_select = soup.find('select', id='download_bitrate')
-        selected_option = bitrate_select.find('option', selected=True) if bitrate_select else None
-        if not selected_option and bitrate_select:
-             selected_option = bitrate_select.find("option")
+        options = soup.select('select.js-downloadBitrate option')
+        bitrate = None
+        resolution_text = 'N/A'
 
-        if not selected_option or not selected_option.get('value'):
-            ThreadSafeLogger.error(f"Bitrate select element/option not found or has no value for ID: {cid}. Page structure might have changed.")
+        for opt in options:
+            val = opt.get('value')
+            text = opt.get_text().lower() if opt.get_text() else ''
+            if val and '4k' in text:
+                bitrate = val
+                resolution_text = opt.get_text()
+                ThreadSafeLogger.info(f"Found 4K option: {bitrate} ({resolution_text}) for ID {cid}")
+                break
+
+        if not bitrate:
+            bitrates = []
+            for opt in options:
+                val = opt.get('value')
+                if val and isinstance(val, str) and val.isdigit():
+                    bitrates.append(int(val))
+            if bitrates:
+                max_bitrate = max(bitrates)
+                bitrate = str(max_bitrate)
+                max_option = soup.find('option', {'value': bitrate})
+                resolution_text = max_option.get_text() if max_option else 'N/A'
+                ThreadSafeLogger.info(f"Found max bitrate {bitrate} ({resolution_text}) for ID {cid}")
+
+        if not bitrate:
+            ThreadSafeLogger.error(f"No valid bitrate options found for ID: {cid}. Page structure might have changed.")
+            body_start = soup.find('body')
+            snippet = str(body_start)[:1000] if body_start else 'No body tag found'
+            ThreadSafeLogger.debug(f"HTML snippet near bitrate for {cid}: {snippet}")
             return None, None
-        bitrate = selected_option.get('value')
-        ThreadSafeLogger.info(f"Found bitrate {bitrate} for ID {cid}")
     except Exception as e:
         ThreadSafeLogger.error(f"Error parsing bitrate for ID {cid}: {e}")
         return None, None
