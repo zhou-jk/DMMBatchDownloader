@@ -129,6 +129,8 @@ def decrypt_single_file(task: DecryptTask) -> bool:
 
     # Decryption retry loop
     for attempt in range(max_retries):
+        ThreadSafeLogger.info(f"Waiting 60 seconds before decryption attempt {attempt + 1} for {Path(dcv_file_path).name}")
+        time.sleep(60)
         should_retry = False
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=False, 
