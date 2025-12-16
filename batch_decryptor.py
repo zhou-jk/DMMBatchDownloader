@@ -31,6 +31,23 @@ decrypt_stats = {
     'total': 0
 }
 
+# Rate limiting for decryption requests
+DECRYPT_MIN_INTERVAL = 70  # seconds
+_last_decrypt_time_lock = threading.Lock()
+_last_decrypt_time = 0.0
+
+def wait_for_decrypt_rate_limit():
+    """Wait if needed to ensure at least DECRYPT_MIN_INTERVAL seconds between decrypt requests."""
+    global _last_decrypt_time
+    with _last_decrypt_time_lock:
+        now = time.time()
+        elapsed = now - _last_decrypt_time
+        if _last_decrypt_time > 0 and elapsed < DECRYPT_MIN_INTERVAL:
+            wait_time = DECRYPT_MIN_INTERVAL - elapsed
+            ThreadSafeLogger.info(f"Rate limiting: waiting {wait_time:.1f}s to reach {DECRYPT_MIN_INTERVAL}s interval")
+            time.sleep(wait_time)
+        _last_decrypt_time = time.time()
+
 class DecryptTask:
     """Represents a single decryption task"""
     def __init__(self, dcv_file_path: str, config, decrypt_tool_path: str):
@@ -129,8 +146,7 @@ def decrypt_single_file(task: DecryptTask) -> bool:
 
     # Decryption retry loop
     for attempt in range(max_retries):
-        ThreadSafeLogger.info(f"Waiting 60 seconds before decryption attempt {attempt + 1} for {Path(dcv_file_path).name}")
-        time.sleep(60)
+        wait_for_decrypt_rate_limit()
         should_retry = False
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=False, 
