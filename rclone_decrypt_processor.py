@@ -32,12 +32,18 @@ class RcloneDecryptProcessor:
     
     def __init__(self, config: configparser.ConfigParser, remote_name: Optional[str] = None):
         self.config = config
+        
+        # Check if Rclone section exists
+        if not config.has_section('Rclone'):
+            raise ValueError("[Rclone] section not found in config. Rclone features are not configured.")
+        
         # Get rclone configuration from config file
         rclone_config = config['Rclone']
-        self.remote_name = remote_name or rclone_config['remote_name']
-        self.remote_dcv_path = rclone_config['remote_dcv_path']
-        self.remote_mkv_path = rclone_config['remote_mkv_path']
-        self.rclone_executable = rclone_config['rclone_executable']
+        
+        self.remote_name = remote_name or rclone_config.get('remote_name', 'remote')
+        self.remote_dcv_path = rclone_config.get('remote_dcv_path', '')
+        self.remote_mkv_path = rclone_config.get('remote_mkv_path', '')
+        self.rclone_executable = rclone_config.get('rclone_executable', 'rclone')
         
         self.decrypt_tool_path = self._locate_decrypt_tool()
         self.temp_dir = None
@@ -478,6 +484,11 @@ def main():
         processor = RcloneDecryptProcessor(config, args.remote)
     except FileNotFoundError as e:
         logging.critical(str(e))
+        return 1
+    except ValueError as e:
+        logging.error(str(e))
+        print(f"❌ {e}")
+        print("   Add [Rclone] section to config.ini to use rclone features.")
         return 1
     
     # Check rclone availability
