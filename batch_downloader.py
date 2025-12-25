@@ -318,20 +318,39 @@ def fetch_and_download_parts(task: DownloadTask) -> Tuple[Optional[List[str]], O
         ThreadSafeLogger.error(f"Error determining product ID suffix for {cid} with bitrate {bitrate}: {e}")
         return None, None
 
+    # Build list of product IDs to try: with suffix first, then without (fallback for videoc storefront)
+    product_ids_to_try = [product_id_for_dl]
+    if pid_suffix and online_cid != product_id_for_dl:
+        product_ids_to_try.append(online_cid)  # Fallback: try without dl suffix
+
     downloaded_files_list = []
     all_parts_downloaded = True
+    successful_product_id = None
+    
     for i in range(1, parts_count + 1):
         part_suffix = f" Part {i}" if parts_count > 1 else ""
         cid_part_label = f"{cid}{part_suffix}"
+        downloaded_file_path = None
 
-        base_download_url = f'https://www.dmm.co.jp/monthly/premium/-/proxy/=/product_id={product_id_for_dl}/transfer_type=download/rate={bitrate}/drm=1/ftype=dcv'
-        part_download_url = base_download_url + (f'/part={i}' if parts_count > 1 else '')
+        # Try each product ID until one works
+        for try_product_id in product_ids_to_try:
+            base_download_url = f'https://www.dmm.co.jp/monthly/premium/-/proxy/=/product_id={try_product_id}/transfer_type=download/rate={bitrate}/drm=1/ftype=dcv'
+            part_download_url = base_download_url + (f'/part={i}' if parts_count > 1 else '')
 
-        downloaded_file_path = download_dcv_file(
-            part_download_url, download_dir, cid_part_label,
-            headers_main, headers_download,
-            max_retries, retry_delay, proxies
-        )
+            ThreadSafeLogger.info(f"Trying product_id={try_product_id} for {cid_part_label}")
+            downloaded_file_path = download_dcv_file(
+                part_download_url, download_dir, cid_part_label,
+                headers_main, headers_download,
+                max_retries, retry_delay, proxies
+            )
+
+            if downloaded_file_path:
+                if successful_product_id is None:
+                    successful_product_id = try_product_id
+                    ThreadSafeLogger.info(f"Successfully using product_id={try_product_id} for {cid}")
+                break
+            else:
+                ThreadSafeLogger.warning(f"product_id={try_product_id} failed for {cid_part_label}, trying next...")
 
         if downloaded_file_path:
             downloaded_files_list.append(downloaded_file_path)
@@ -455,10 +474,10 @@ def main():
     
     # Setup proxy configuration
     proxies = {}
-    if network.get('http_proxy', '').strip():
-        proxies['http'] = network['http_proxy'].strip()
-    if network.get('https_proxy', '').strip():
-        proxies['https'] = network['https_proxy'].strip()
+    proxy_url = network.get('proxy', '').strip()
+    if proxy_url:
+        proxies['http'] = proxy_url
+        proxies['https'] = proxy_url
     if proxies:
         ThreadSafeLogger.info(f"Using proxy configuration: {proxies}")
     else:

@@ -4,3 +4,5 @@ __pycache__/
 ids.txt
 failed_ids.txt
 cids.txt
+process_all.log
+process_errors.log

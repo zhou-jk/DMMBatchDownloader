@@ -842,10 +842,10 @@ def main():
     
     # Setup proxy configuration
     proxies = {}
-    if network.get('http_proxy', '').strip():
-        proxies['http'] = network['http_proxy'].strip()
-    if network.get('https_proxy', '').strip():
-        proxies['https'] = network['https_proxy'].strip()
+    proxy_url = network.get('proxy', '').strip()
+    if proxy_url:
+        proxies['http'] = proxy_url
+        proxies['https'] = proxy_url
     if proxies:
         ThreadSafeLogger.info(f"Using proxy configuration: {proxies}")
     else:

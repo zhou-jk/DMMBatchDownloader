@@ -159,8 +159,7 @@ def create_default_config(file_path: str):
     default_config['Network'] = {
         'user_agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
         'cookie': 'age_check_done=1; ; INT_SESID=YOUR-SESSION-ID; licenseUID=YOUR-LICENSE-ID',
-        'http_proxy': '',
-        'https_proxy': ''
+        'proxy': ''
     }
     default_config['Settings'] = {
         'max_retries': '3',
