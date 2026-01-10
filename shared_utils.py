@@ -239,16 +239,18 @@ def validate_configuration(config: configparser.ConfigParser):
     except Exception as e:
          errors.append(f"Unexpected error validating [Settings]: {e}")
 
-    try:
-        rclone_required = ['rclone_executable', 'remote_name', 'remote_dcv_path', 'remote_mkv_path']
-        for key in rclone_required:
-            if not config.get('Rclone', key, fallback='').strip():
-                errors.append(f"[Rclone] '{key}': Value cannot be empty.")
+    # Rclone validation is optional - only validate if section exists
+    if config.has_section('Rclone'):
+        try:
+            rclone_required = ['rclone_executable', 'remote_name', 'remote_dcv_path', 'remote_mkv_path']
+            for key in rclone_required:
+                if not config.get('Rclone', key, fallback='').strip():
+                    errors.append(f"[Rclone] '{key}': Value cannot be empty.")
 
-    except configparser.NoOptionError as e:
-        errors.append(f"Missing required option in [Rclone]: {e.option}")
-    except Exception as e:
-         errors.append(f"Unexpected error validating [Rclone]: {e}")
+        except configparser.NoOptionError as e:
+            errors.append(f"Missing required option in [Rclone]: {e.option}")
+        except Exception as e:
+             errors.append(f"Unexpected error validating [Rclone]: {e}")
 
     if errors:
         error_message = f"Configuration validation failed ({CONFIG_FILE}):\n" + "\n".join(f"- {e}" for e in errors)
@@ -266,10 +268,15 @@ def load_configuration(file_path: str) -> configparser.ConfigParser:
     config = configparser.ConfigParser(interpolation=None)
     try:
         config.read(file_path, encoding='utf-8')
-        required_sections = ['Paths', 'Network', 'Settings', 'Rclone']
+        required_sections = ['Paths', 'Network', 'Settings']
+        optional_sections = ['Rclone']
         for section in required_sections:
             if section not in config:
                 raise ValueError(f"Missing required section [{section}] in {file_path}")
+        # Check optional sections
+        for section in optional_sections:
+            if section not in config:
+                print(f"Note: Optional section [{section}] not found in {file_path}. Related features will be disabled.")
         validate_configuration(config)
         print(f"Configuration loaded and validated successfully from {file_path}")
         return config
