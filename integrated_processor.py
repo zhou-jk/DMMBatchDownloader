@@ -21,6 +21,7 @@ import os
 import sys
 import time
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -173,32 +174,21 @@ def get_movie_count(cid: str, headers: Dict, max_retries: int, retry_delay: int,
 
 def get_online_cid(cid: str, headers: Dict, max_retries: int, retry_delay: int, 
                   proxies: Optional[Dict] = None) -> Optional[str]:
-    """Retrieve the online ID ('品番') by parsing the video page."""
+    """Retrieve the online ID ('item_variant') by parsing the video page JavaScript."""
     url = f'https://www.dmm.co.jp/monthly/premium/-/detail/=/cid={cid}/'
     cid_context = f"Online CID page for {cid}"
     response = make_request("GET", url, headers, max_retries, retry_delay, cid_context, proxies=proxies)
 
     if response:
         try:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            info_div = soup.find("div", {"class": "bx-productInfo"})
-            if isinstance(info_div, Tag):
-                rows = info_div.find_all("tr")
-                for tr in rows:
-                    header_cell = tr.find("th") or (tr.find("td") if tr.find("td") else None)
-                    if header_cell and "品番" in header_cell.get_text(strip=True):
-                        value_cell = header_cell.find_next_sibling("td")
-                        if value_cell:
-                            online_cid = value_cell.get_text(strip=True)
-                            ThreadSafeLogger.debug(f"Found online CID {online_cid} for {cid}")
-                            return online_cid
-                        else:
-                             ThreadSafeLogger.warning(f"Found '品番' row for {cid}, but couldn't find the value cell.")
-                             break
-                ThreadSafeLogger.warning(f"'品番' (Product Number) not found in product info table for {cid}")
+            match = re.search(r'item_variant\s*:\s*"([^"]+)"', response.text)
+            if match:
+                item_variant = match.group(1)
+                ThreadSafeLogger.debug(f"Found item_variant {item_variant} for {cid}")
+                return item_variant
             else:
-                ThreadSafeLogger.warning(f"Product info div ('bx-productInfo') not found or is not a Tag on page for {cid}")
-            return None
+                ThreadSafeLogger.warning(f"item_variant not found in JavaScript for {cid}")
+                return None
         except Exception as e:
             ThreadSafeLogger.error(f"Error parsing online CID page for {cid}: {e}")
             return None
