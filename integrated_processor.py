@@ -76,7 +76,8 @@ class IntegratedTask:
     """Represents a complete processing task for a single video ID"""
     
     def __init__(self, cid: str, config, headers_main: Dict, headers_download: Dict, 
-                 decrypt_tool_path: str, rclone_config: Dict, proxies: Optional[Dict] = None):
+                 decrypt_tool_path: str, rclone_config: Optional[Dict] = None, proxies: Optional[Dict] = None,
+                 output_dir: Optional[str] = None):
         self.cid = cid
         self.config = config
         self.headers_main = headers_main
@@ -84,6 +85,7 @@ class IntegratedTask:
         self.decrypt_tool_path = decrypt_tool_path
         self.rclone_config = rclone_config
         self.proxies = proxies
+        self.output_dir = output_dir  # Local output directory when rclone is not configured
         
         # Task state
         self.status = TaskStatus.PENDING
@@ -689,75 +691,111 @@ def check_rclone_available(rclone_executable: str) -> bool:
         return False
 
 def process_integrated_task(task: IntegratedTask) -> bool:
-    """Process a complete integrated task: download -> decrypt -> upload"""
+    """Process a complete integrated task: download -> decrypt -> upload (or save locally)"""
     cid = task.cid
     task.start_time = datetime.now()
+    
+    # Determine if we're uploading or saving locally
+    rclone_enabled = task.rclone_config is not None
+    phase_count = 3 if rclone_enabled else 2
     
     ThreadSafeLogger.info(f"=== Starting Integrated Processing for ID: {cid} ===")
     
     try:
-        with TemporaryDirectory(prefix=f"integrated_{cid}_") as temp_dir:
-            temp_path = Path(temp_dir)
-            ThreadSafeLogger.debug(f"Using temporary directory: {temp_dir}")
+        # Use output_dir for decryption if in local mode, otherwise use temp_dir
+        if rclone_enabled:
+            temp_context = TemporaryDirectory(prefix=f"integrated_{cid}_")
+            temp_dir = temp_context.__enter__()
+            decrypt_output_dir = temp_dir
+        else:
+            temp_context = None
+            temp_dir = None
+            decrypt_output_dir = task.output_dir
+            Path(decrypt_output_dir).mkdir(parents=True, exist_ok=True)
+        
+        try:
+            # Use a temp dir for downloads even in local mode
+            if temp_dir is None:
+                download_temp = TemporaryDirectory(prefix=f"download_{cid}_")
+                download_dir = download_temp.__enter__()
+            else:
+                download_temp = None
+                download_dir = temp_dir
             
-            # Check disk space
-            if not check_disk_space(temp_dir, 10.0):
-                ThreadSafeLogger.error(f"Insufficient disk space in temporary directory for ID {cid}")
-                task.error_message = "Insufficient disk space"
-                update_processing_stats('fail_download')
-                return False
-            
-            # Phase 1: Download
-            ThreadSafeLogger.info(f"Phase 1/3: Downloading DCV files for ID {cid}")
-            task.status = TaskStatus.DOWNLOADING
-            update_processing_stats('start_download')
-            
-            if not download_video_parts(task, temp_dir):
-                ThreadSafeLogger.error(f"Download phase failed for ID {cid}")
-                update_processing_stats('fail_download')
-                task.status = TaskStatus.FAILED
-                return False
-            
-            # Handle special case where video has 0 parts
-            if task.parts_count == 0:
-                ThreadSafeLogger.info(f"ID {cid} has 0 parts. Marking as completed.")
+            try:
+                ThreadSafeLogger.debug(f"Using download directory: {download_dir}")
+                ThreadSafeLogger.debug(f"Using decrypt output directory: {decrypt_output_dir}")
+                
+                # Check disk space
+                if not check_disk_space(download_dir, 10.0):
+                    ThreadSafeLogger.error(f"Insufficient disk space in temporary directory for ID {cid}")
+                    task.error_message = "Insufficient disk space"
+                    update_processing_stats('fail_download')
+                    return False
+                
+                # Phase 1: Download
+                ThreadSafeLogger.info(f"Phase 1/{phase_count}: Downloading DCV files for ID {cid}")
+                task.status = TaskStatus.DOWNLOADING
+                update_processing_stats('start_download')
+                
+                if not download_video_parts(task, download_dir):
+                    ThreadSafeLogger.error(f"Download phase failed for ID {cid}")
+                    update_processing_stats('fail_download')
+                    task.status = TaskStatus.FAILED
+                    return False
+                
+                # Handle special case where video has 0 parts
+                if task.parts_count == 0:
+                    ThreadSafeLogger.info(f"ID {cid} has 0 parts. Marking as completed.")
+                    update_processing_stats('complete')
+                    task.status = TaskStatus.COMPLETED
+                    return True
+                
+                # Phase 2: Decrypt
+                ThreadSafeLogger.info(f"Phase 2/{phase_count}: Decrypting DCV files for ID {cid}")
+                task.status = TaskStatus.DECRYPTING
+                update_processing_stats('finish_download')
+                
+                if not decrypt_video_parts(task, decrypt_output_dir):
+                    ThreadSafeLogger.error(f"Decryption phase failed for ID {cid}")
+                    update_processing_stats('fail_decrypt')
+                    task.status = TaskStatus.FAILED
+                    return False
+                
+                # Phase 3: Upload (only if rclone is configured)
+                if rclone_enabled:
+                    ThreadSafeLogger.info(f"Phase 3/{phase_count}: Uploading MKV files for ID {cid}")
+                    task.status = TaskStatus.UPLOADING
+                    update_processing_stats('finish_decrypt')
+                    
+                    if not upload_video_parts(task):
+                        ThreadSafeLogger.error(f"Upload phase failed for ID {cid}")
+                        update_processing_stats('fail_upload')
+                        task.status = TaskStatus.FAILED
+                        return False
+                else:
+                    ThreadSafeLogger.info(f"Skipping upload - files saved to: {decrypt_output_dir}")
+                    update_processing_stats('finish_decrypt')
+                
+                # Success
+                ThreadSafeLogger.info(f"✅ All phases completed successfully for ID {cid}")
                 update_processing_stats('complete')
                 task.status = TaskStatus.COMPLETED
+                task.end_time = datetime.now()
+                
+                # Log processing time
+                duration = task.end_time - task.start_time
+                ThreadSafeLogger.info(f"Processing time for ID {cid}: {duration}")
+                
                 return True
             
-            # Phase 2: Decrypt
-            ThreadSafeLogger.info(f"Phase 2/3: Decrypting DCV files for ID {cid}")
-            task.status = TaskStatus.DECRYPTING
-            update_processing_stats('finish_download')
-            
-            if not decrypt_video_parts(task, temp_dir):
-                ThreadSafeLogger.error(f"Decryption phase failed for ID {cid}")
-                update_processing_stats('fail_decrypt')
-                task.status = TaskStatus.FAILED
-                return False
-            
-            # Phase 3: Upload
-            ThreadSafeLogger.info(f"Phase 3/3: Uploading MKV files for ID {cid}")
-            task.status = TaskStatus.UPLOADING
-            update_processing_stats('finish_decrypt')
-            
-            if not upload_video_parts(task):
-                ThreadSafeLogger.error(f"Upload phase failed for ID {cid}")
-                update_processing_stats('fail_upload')
-                task.status = TaskStatus.FAILED
-                return False
-            
-            # Success
-            ThreadSafeLogger.info(f"✅ All phases completed successfully for ID {cid}")
-            update_processing_stats('complete')
-            task.status = TaskStatus.COMPLETED
-            task.end_time = datetime.now()
-            
-            # Log processing time
-            duration = task.end_time - task.start_time
-            ThreadSafeLogger.info(f"Processing time for ID {cid}: {duration}")
-            
-            return True
+            finally:
+                if download_temp is not None:
+                    download_temp.__exit__(None, None, None)
+        
+        finally:
+            if temp_context is not None:
+                temp_context.__exit__(None, None, None)
     
     except Exception as e:
         ThreadSafeLogger.error(f"Unexpected error processing ID {cid}: {e}")
@@ -793,12 +831,20 @@ def main():
     paths = config['Paths']
     network = config['Network']
     settings = config['Settings']
-    rclone_config = config['Rclone']
+    
+    # Check if Rclone is configured (optional)
+    rclone_enabled = config.has_section('Rclone')
+    rclone_config = dict(config['Rclone']) if rclone_enabled else None
     
     # Setup logging
     setup_logging(paths['log_file_all'], paths['log_file_errors'])
     ThreadSafeLogger.info("Logging initialized for integrated processor.")
     ThreadSafeLogger.info(f"Using configuration from: {CONFIG_FILE}")
+    
+    if rclone_enabled:
+        ThreadSafeLogger.info("Rclone is configured - files will be uploaded after decryption")
+    else:
+        ThreadSafeLogger.info("Rclone not configured - files will be saved locally after decryption")
     
     # Setup directories
     try:
@@ -826,10 +872,20 @@ def main():
             ThreadSafeLogger.critical(f"Decryption executable '{decrypt_executable}' not found.")
             return 1
     
-    # Check rclone availability
-    if not check_rclone_available(rclone_config['rclone_executable']):
-        print("❌ Rclone not available. Please install rclone and ensure it's in PATH.")
-        return 1
+    # Check rclone availability (only if configured)
+    if rclone_enabled:
+        if not check_rclone_available(rclone_config['rclone_executable']):
+            print("❌ Rclone not available. Please install rclone and ensure it's in PATH.")
+            return 1
+    else:
+        ThreadSafeLogger.info("Skipping rclone check - not configured")
+    
+    # Get output directory for local mode
+    output_dir = None
+    if not rclone_enabled:
+        output_dir = expand_user_path(paths.get('decrypt_output_dir', './decrypted'))
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        ThreadSafeLogger.info(f"Local output directory: {output_dir}")
     
     # Prepare headers
     headers_main = {
@@ -877,7 +933,7 @@ def main():
     integrated_tasks = []
     for cid in ids_to_process:
         task = IntegratedTask(cid, config, headers_main, headers_download, 
-                             decrypt_tool_path, rclone_config, proxies)
+                             decrypt_tool_path, rclone_config, proxies, output_dir)
         integrated_tasks.append(task)
     
     # Execute integrated processing with thread pool
