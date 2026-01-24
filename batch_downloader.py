@@ -134,58 +134,63 @@ def extract_download_links(soup: BeautifulSoup, cid: str) -> Dict[str, List[str]
     """Extract download links directly from HTML page.
     
     Returns a dict mapping bitrate to list of download URLs for each part.
-    Example: {'4k': ['url1'], '6000': ['url1'], ...}
+    Example: {'4k': ['url1'], '4000kb': ['url1'], ...}
     """
     download_links: Dict[str, List[str]] = {}
     
     try:
-        # Find all download link containers with rate IDs
-        # Pattern: <ul id="download_rate_XXX" ...> containing <a href="...">
-        rate_containers = soup.find_all('ul', id=re.compile(r'^download_rate_'))
+        # Method 1: Find all download links directly by href pattern
+        # This is the most reliable method - look for any link with /proxy/= and ftype=dcv
+        all_dcv_links = soup.find_all('a', href=re.compile(r'/proxy/=/product_id=.*ftype=dcv'))
+        ThreadSafeLogger.debug(f"Found {len(all_dcv_links)} total dcv links in HTML for {cid}")
         
-        for container in rate_containers:
-            # Extract rate from id, e.g., "download_rate_10000" -> "10000"
-            container_id = str(container.get('id', ''))
-            rate_match = re.search(r'download_rate_(\w+)', container_id)
-            if not rate_match:
+        for link in all_dcv_links:
+            href = link.get('href')
+            if not href:
                 continue
             
-            rate = rate_match.group(1)
+            href_str = str(href)
             
-            # Find all download links in this container
-            links = container.find_all('a', attrs={'name': 'download'})
-            if not links:
-                links = container.find_all('a', href=re.compile(r'/proxy/=/product_id='))
-            
-            urls: List[str] = []
-            for link in links:
-                href = link.get('href')
-                if href and '/proxy/=' in str(href) and 'ftype=dcv' in str(href):
-                    urls.append(str(href))
-            
-            if urls:
-                # Map container rate to actual bitrate value from URL
-                # rate_10000 corresponds to 4k, so we need to get actual rate from URL
-                url_rate_match = re.search(r'/rate=([^/]+)/', urls[0])
-                if url_rate_match:
-                    actual_rate = url_rate_match.group(1)
-                    download_links[actual_rate] = urls
-                    ThreadSafeLogger.debug(f"Found {len(urls)} download link(s) for rate {actual_rate} for {cid}")
+            # Extract rate from URL (e.g., /rate=4000kb/ or /rate=4k/)
+            rate_match = re.search(r'/rate=([^/]+)/', href_str)
+            if rate_match:
+                rate = rate_match.group(1)
+                if rate not in download_links:
+                    download_links[rate] = []
+                
+                # Make sure URL is absolute
+                if href_str.startswith('/'):
+                    href_str = 'https://www.dmm.co.jp' + href_str
+                
+                if href_str not in download_links[rate]:
+                    download_links[rate].append(href_str)
+                    ThreadSafeLogger.debug(f"Found download link for rate {rate}: {href_str[:80]}...")
         
-        # Also try to find standalone download links (for simpler page structures)
+        # Method 2: If no links found, try searching within rate containers
         if not download_links:
-            all_links = soup.find_all('a', href=re.compile(r'/proxy/=/product_id=.*ftype=dcv'))
-            for link in all_links:
-                href = link.get('href')
-                if href:
-                    href_str = str(href)
-                    rate_match = re.search(r'/rate=([^/]+)/', href_str)
-                    if rate_match:
-                        rate = rate_match.group(1)
-                        if rate not in download_links:
-                            download_links[rate] = []
-                        if href_str not in download_links[rate]:
-                            download_links[rate].append(href_str)
+            rate_containers = soup.find_all('ul', id=re.compile(r'^download_rate_'))
+            ThreadSafeLogger.debug(f"Found {len(rate_containers)} rate containers for {cid}")
+            
+            for container in rate_containers:
+                links = container.find_all('a')
+                for link in links:
+                    href = link.get('href')
+                    if href and 'ftype=dcv' in str(href):
+                        href_str = str(href)
+                        rate_match = re.search(r'/rate=([^/]+)/', href_str)
+                        if rate_match:
+                            rate = rate_match.group(1)
+                            if rate not in download_links:
+                                download_links[rate] = []
+                            if href_str.startswith('/'):
+                                href_str = 'https://www.dmm.co.jp' + href_str
+                            if href_str not in download_links[rate]:
+                                download_links[rate].append(href_str)
+        
+        if download_links:
+            ThreadSafeLogger.info(f"Extracted download links for {cid}: {list(download_links.keys())}")
+        else:
+            ThreadSafeLogger.debug(f"No download links found in HTML for {cid}")
         
     except Exception as e:
         ThreadSafeLogger.error(f"Error extracting download links for {cid}: {e}")
@@ -195,27 +200,31 @@ def extract_download_links(soup: BeautifulSoup, cid: str) -> Dict[str, List[str]
 def select_best_download_link(download_links: Dict[str, List[str]]) -> Tuple[Optional[str], Optional[str]]:
     """Select the best quality download link from available options.
     
-    Priority: 4k > highest numeric bitrate
+    Priority: 4k > highest numeric bitrate (handles formats like '4000kb', '6000', etc.)
     Returns (url, bitrate) tuple.
     """
     if not download_links:
         return None, None
     
-    # Priority 1: 4K
-    if '4k' in download_links and download_links['4k']:
-        return download_links['4k'][0], '4k'
+    # Priority 1: 4K (check various formats)
+    for rate_key in download_links.keys():
+        if '4k' in rate_key.lower():
+            if download_links[rate_key]:
+                return download_links[rate_key][0], rate_key
     
-    # Priority 2: Highest numeric bitrate
-    numeric_rates = []
+    # Priority 2: Highest numeric bitrate (extract number from formats like '4000kb', '6000', etc.)
+    rate_values = []
     for rate in download_links.keys():
-        try:
-            numeric_rates.append(int(rate))
-        except ValueError:
-            pass
+        # Extract numeric part from rate string (e.g., '4000kb' -> 4000, '6000' -> 6000)
+        num_match = re.search(r'(\d+)', rate)
+        if num_match:
+            rate_values.append((int(num_match.group(1)), rate))
     
-    if numeric_rates:
-        best_rate = str(max(numeric_rates))
-        if best_rate in download_links and download_links[best_rate]:
+    if rate_values:
+        # Sort by numeric value descending, pick highest
+        rate_values.sort(key=lambda x: x[0], reverse=True)
+        best_rate = rate_values[0][1]
+        if download_links[best_rate]:
             return download_links[best_rate][0], best_rate
     
     # Fallback: return first available
