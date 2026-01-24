@@ -131,18 +131,20 @@ def get_online_cid(cid: str, headers: Dict, max_retries: int, retry_delay: int, 
         return None
 
 def extract_download_links(soup: BeautifulSoup, cid: str) -> Dict[str, List[str]]:
-    """Extract download links directly from HTML page.
+    """Extract download links from HTML page.
+    
+    First tries to find <a> tags with download links.
+    If not found, parses JavaScript data to construct download URLs.
     
     Returns a dict mapping bitrate to list of download URLs for each part.
-    Example: {'4k': ['url1'], '4000kb': ['url1'], ...}
+    Example: {'4k': ['url1'], '4000': ['url1'], ...}
     """
     download_links: Dict[str, List[str]] = {}
     
     try:
-        # Method 1: Find all download links directly by href pattern
-        # This is the most reliable method - look for any link with /proxy/= and ftype=dcv
-        all_dcv_links = soup.find_all('a', href=re.compile(r'/proxy/=/product_id=.*ftype=dcv'))
-        ThreadSafeLogger.debug(f"Found {len(all_dcv_links)} total dcv links in HTML for {cid}")
+        # Method 1: Find <a> tags with download links
+        all_dcv_links = soup.find_all('a', href=re.compile(r'ftype=dcv'))
+        ThreadSafeLogger.debug(f"Found {len(all_dcv_links)} <a> dcv links in HTML for {cid}")
         
         for link in all_dcv_links:
             href = link.get('href')
@@ -150,47 +152,56 @@ def extract_download_links(soup: BeautifulSoup, cid: str) -> Dict[str, List[str]
                 continue
             
             href_str = str(href)
-            
-            # Extract rate from URL (e.g., /rate=4000kb/ or /rate=4k/)
             rate_match = re.search(r'/rate=([^/]+)/', href_str)
             if rate_match:
                 rate = rate_match.group(1)
                 if rate not in download_links:
                     download_links[rate] = []
                 
-                # Make sure URL is absolute
                 if href_str.startswith('/'):
                     href_str = 'https://www.dmm.co.jp' + href_str
                 
                 if href_str not in download_links[rate]:
                     download_links[rate].append(href_str)
-                    ThreadSafeLogger.debug(f"Found download link for rate {rate}: {href_str[:80]}...")
-        
-        # Method 2: If no links found, try searching within rate containers
-        if not download_links:
-            rate_containers = soup.find_all('ul', id=re.compile(r'^download_rate_'))
-            ThreadSafeLogger.debug(f"Found {len(rate_containers)} rate containers for {cid}")
-            
-            for container in rate_containers:
-                links = container.find_all('a')
-                for link in links:
-                    href = link.get('href')
-                    if href and 'ftype=dcv' in str(href):
-                        href_str = str(href)
-                        rate_match = re.search(r'/rate=([^/]+)/', href_str)
-                        if rate_match:
-                            rate = rate_match.group(1)
-                            if rate not in download_links:
-                                download_links[rate] = []
-                            if href_str.startswith('/'):
-                                href_str = 'https://www.dmm.co.jp' + href_str
-                            if href_str not in download_links[rate]:
-                                download_links[rate].append(href_str)
         
         if download_links:
-            ThreadSafeLogger.info(f"Extracted download links for {cid}: {list(download_links.keys())}")
+            ThreadSafeLogger.info(f"Found download links in <a> tags for {cid}: {list(download_links.keys())}")
+            return download_links
+        
+        # Method 2: Parse JavaScript data embedded in page
+        # Look for patterns like: product_id : 'esdx081dl7', rate : '4k', etc.
+        scripts = soup.find_all('script')
+        for script in scripts:
+            script_text = script.string if script.string else ''
+            if not script_text:
+                continue
+            
+            # Find all rate blocks with product_id and rate info
+            # Pattern matches: 10000 : { product_id : 'xxx', rate : 'yyy', ... }
+            # Note: \u005f is unicode escape for underscore
+            rate_blocks = re.findall(
+                r'(\d+)\s*:\s*\{[^}]*product(?:\\u005f|_)id\s*:\s*[\'"]([^\'"]+)[\'"][^}]*rate\s*:\s*[\'"]([^\'"]+)[\'"][^}]*\}',
+                script_text,
+                re.DOTALL
+            )
+            
+            if rate_blocks:
+                ThreadSafeLogger.debug(f"Found {len(rate_blocks)} rate blocks in JavaScript for {cid}")
+                for block_id, product_id, rate in rate_blocks:
+                    # Construct download URL
+                    download_url = f'https://www.dmm.co.jp/monthly/premium/-/proxy/=/product_id={product_id}/transfer_type=download/rate={rate}/drm=1/ftype=dcv'
+                    
+                    if rate not in download_links:
+                        download_links[rate] = []
+                    
+                    if download_url not in download_links[rate]:
+                        download_links[rate].append(download_url)
+                        ThreadSafeLogger.debug(f"Constructed download URL for rate {rate}: {download_url}")
+        
+        if download_links:
+            ThreadSafeLogger.info(f"Extracted download links from JavaScript for {cid}: {list(download_links.keys())}")
         else:
-            ThreadSafeLogger.debug(f"No download links found in HTML for {cid}")
+            ThreadSafeLogger.warning(f"No download links found in HTML for {cid}")
         
     except Exception as e:
         ThreadSafeLogger.error(f"Error extracting download links for {cid}: {e}")
@@ -349,187 +360,51 @@ def fetch_and_download_parts(task: DownloadTask) -> Tuple[Optional[List[str]], O
         
         if download_links:
             # Found download links in HTML - use them directly
-            ThreadSafeLogger.info(f"Found {len(download_links)} download link(s) in HTML for ID {cid}")
+            ThreadSafeLogger.info(f"Found {len(download_links)} bitrate option(s) in HTML for ID {cid}")
             
             # Select best quality link
             best_link, selected_bitrate = select_best_download_link(download_links)
             if best_link and selected_bitrate:
                 ThreadSafeLogger.info(f"Selected bitrate: {selected_bitrate} for ID {cid}")
                 
-                # For single part videos, download directly
+                # Get all parts for selected bitrate
                 part_links = download_links.get(selected_bitrate, [])
-                if len(part_links) == 1:
-                    parts_count = 1
+                parts_count = len(part_links)
+                
+                if parts_count == 0:
+                    ThreadSafeLogger.error(f"No download links for selected bitrate {selected_bitrate} for ID {cid}")
+                    return None, None
+                
+                downloaded_files = []
+                for i, link in enumerate(part_links, 1):
+                    part_suffix = f" Part {i}" if parts_count > 1 else ""
+                    cid_part_label = f"{cid}{part_suffix}"
                     downloaded_file = download_dcv_file(
-                        best_link, download_dir, cid,
+                        link, download_dir, cid_part_label,
                         headers_main, headers_download,
                         max_retries, retry_delay, proxies
                     )
                     if downloaded_file:
-                        return [downloaded_file], parts_count
+                        downloaded_files.append(downloaded_file)
                     else:
+                        ThreadSafeLogger.error(f"Download failed for {cid_part_label}")
+                        # Clean up partial downloads
+                        for f in downloaded_files:
+                            safe_remove(f, "partial download cleanup")
                         return None, None
-                else:
-                    # Multiple parts - download all parts for the selected bitrate
-                    parts_count = len(part_links)
-                    downloaded_files = []
-                    
-                    for i, link in enumerate(part_links, 1):
-                        part_suffix = f" Part {i}" if parts_count > 1 else ""
-                        cid_part_label = f"{cid}{part_suffix}"
-                        downloaded_file = download_dcv_file(
-                            link, download_dir, cid_part_label,
-                            headers_main, headers_download,
-                            max_retries, retry_delay, proxies
-                        )
-                        if downloaded_file:
-                            downloaded_files.append(downloaded_file)
-                        else:
-                            ThreadSafeLogger.error(f"Download failed for {cid_part_label}")
-                            # Clean up partial downloads
-                            for f in downloaded_files:
-                                safe_remove(f, "partial download cleanup")
-                            return None, None
-                    
-                    return downloaded_files, parts_count
-        
-        # Fallback: Parse bitrate selector and construct URLs (old method)
-        ThreadSafeLogger.info(f"No download links found in HTML for {cid}, falling back to URL construction")
-        
-        options = soup.select('select.js-downloadBitrate option')
-        bitrate = None
-        resolution_text = 'N/A'
-
-        for opt in options:
-            val = opt.get('value')
-            text = opt.get_text().lower() if opt.get_text() else ''
-            if val and '4k' in text:
-                bitrate = val
-                resolution_text = opt.get_text()
-                ThreadSafeLogger.info(f"Found 4K option: {bitrate} ({resolution_text}) for ID {cid}")
-                break
-
-        if not bitrate:
-            bitrates = []
-            for opt in options:
-                val = opt.get('value')
-                if val and isinstance(val, str) and val.isdigit():
-                    bitrates.append(int(val))
-            if bitrates:
-                max_bitrate = max(bitrates)
-                bitrate = str(max_bitrate)
-                max_option = soup.find('option', {'value': bitrate})
-                resolution_text = max_option.get_text() if max_option else 'N/A'
-                ThreadSafeLogger.info(f"Found max bitrate {bitrate} ({resolution_text}) for ID {cid}")
-
-        if not bitrate:
-            ThreadSafeLogger.error(f"No valid bitrate options found for ID: {cid}. Page structure might have changed.")
-            body_start = soup.find('body')
-            snippet = str(body_start)[:1000] if body_start else 'No body tag found'
-            ThreadSafeLogger.debug(f"HTML snippet near bitrate for {cid}: {snippet}")
-            return None, None
-    except Exception as e:
-        ThreadSafeLogger.error(f"Error parsing bitrate for ID {cid}: {e}")
-        return None, None
-
-    online_cid = get_online_cid(cid, headers_main, max_retries, retry_delay, proxies)
-    if not online_cid:
-        ThreadSafeLogger.warning(f"Could not determine online CID for {cid}. Using original ID {cid} for API calls.")
-        online_cid = cid
-
-    parts_count = get_movie_count(online_cid, headers_main, max_retries, retry_delay, proxies)
-    if parts_count == -1:
-        ThreadSafeLogger.error(f"Unable to retrieve the number of parts for ID: {cid} (using online ID: {online_cid}). Skipping download.")
-        return None, None
-    elif parts_count == 0:
-        ThreadSafeLogger.warning(f"API reported 0 parts for ID: {cid} (using online ID: {online_cid}). Skipping download.")
-        return [], 0
-    else:
-        ThreadSafeLogger.info(f"Expecting {parts_count} part(s) for ID {cid}")
-
-    try:
-        pid_suffix = None
-        bitrate_log_val = bitrate
-
-        if bitrate == '4k':
-            pid_suffix = 'dl7'
-        else:
-            try:
-                bitrate_val = int(str(bitrate))
-                if bitrate_val >= 4000:
-                    pid_suffix = 'dl6'
-                else:
-                    pid_suffix = 'dl'
-            except ValueError:
-                ThreadSafeLogger.error(f"Invalid non-'4k' bitrate value found for {cid}: {bitrate}. Cannot determine product ID.")
-                return None, None
-
-        if pid_suffix is None:
-             ThreadSafeLogger.error(f"Could not determine pid_suffix for bitrate '{bitrate}' for ID {cid}.")
-             return None, None
-
-        product_id_for_dl = online_cid + pid_suffix
-        ThreadSafeLogger.debug(f"Using product ID {product_id_for_dl} for download requests (Bitrate: {bitrate_log_val}).")
-
-    except Exception as e:
-        ThreadSafeLogger.error(f"Error determining product ID suffix for {cid} with bitrate {bitrate}: {e}")
-        return None, None
-
-    # Build list of product IDs to try: with suffix first, then without (fallback for videoc storefront)
-    product_ids_to_try = [product_id_for_dl]
-    if pid_suffix and online_cid != product_id_for_dl:
-        product_ids_to_try.append(online_cid)  # Fallback: try without dl suffix
-
-    downloaded_files_list = []
-    all_parts_downloaded = True
-    successful_product_id = None
-    
-    for i in range(1, parts_count + 1):
-        part_suffix = f" Part {i}" if parts_count > 1 else ""
-        cid_part_label = f"{cid}{part_suffix}"
-        downloaded_file_path = None
-
-        # Try each product ID until one works
-        for try_product_id in product_ids_to_try:
-            base_download_url = f'https://www.dmm.co.jp/monthly/premium/-/proxy/=/product_id={try_product_id}/transfer_type=download/rate={bitrate}/drm=1/ftype=dcv'
-            part_download_url = base_download_url + (f'/part={i}' if parts_count > 1 else '')
-
-            ThreadSafeLogger.info(f"Trying product_id={try_product_id} for {cid_part_label}")
-            downloaded_file_path = download_dcv_file(
-                part_download_url, download_dir, cid_part_label,
-                headers_main, headers_download,
-                max_retries, retry_delay, proxies
-            )
-
-            if downloaded_file_path:
-                if successful_product_id is None:
-                    successful_product_id = try_product_id
-                    ThreadSafeLogger.info(f"Successfully using product_id={try_product_id} for {cid}")
-                break
+                
+                ThreadSafeLogger.info(f"Successfully downloaded all {parts_count} part(s) for ID {cid}")
+                return downloaded_files, parts_count
             else:
-                ThreadSafeLogger.warning(f"product_id={try_product_id} failed for {cid_part_label}, trying next...")
-
-        if downloaded_file_path:
-            downloaded_files_list.append(downloaded_file_path)
+                ThreadSafeLogger.error(f"Could not select best download link for ID {cid}")
+                return None, None
         else:
-            ThreadSafeLogger.error(f"Download failed for {cid_part_label}. Aborting downloads for this ID.")
-            all_parts_downloaded = False
-            break
-
-    if all_parts_downloaded and len(downloaded_files_list) == parts_count:
-        ThreadSafeLogger.info(f"Successfully downloaded all {parts_count} part(s) for ID {cid}.")
-        return downloaded_files_list, parts_count
-    else:
-        expected_count_str = str(parts_count) if isinstance(parts_count, int) else "unknown"
-        ThreadSafeLogger.error(f"Incomplete download for ID {cid}. Expected {expected_count_str}, got {len(downloaded_files_list)}.")
-        if not all_parts_downloaded:
-            ThreadSafeLogger.info(f"Cleaning up partially downloaded files for failed ID {cid}")
-            for file_to_remove in downloaded_files_list:
-                 safe_remove(file_to_remove, "partial download cleanup")
-            return [], parts_count
-        else:
-            ThreadSafeLogger.warning(f"Logic error: Download reported success but part count mismatch for {cid}.")
-            return downloaded_files_list, parts_count
+            ThreadSafeLogger.error(f"No download links found in HTML for ID {cid}")
+            return None, None
+            
+    except Exception as e:
+        ThreadSafeLogger.error(f"Error parsing page for ID {cid}: {e}")
+        return None, None
 
 def process_single_download(task: DownloadTask) -> bool:
     """Process a single download task (thread worker function)."""

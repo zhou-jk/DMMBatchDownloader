@@ -642,60 +642,77 @@ def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
 
 
 def extract_download_links(soup: BeautifulSoup, cid: str) -> Dict[str, List[str]]:
-    """Extract download links directly from HTML page.
+    """Extract download links from HTML page.
+    
+    First tries to find <a> tags with download links.
+    If not found, parses JavaScript data to construct download URLs.
     
     Returns a dict mapping bitrate to list of download URLs for each part.
-    Example: {'4k': ['url1'], '6000': ['url1'], ...}
+    Example: {'4k': ['url1'], '4000': ['url1'], ...}
     """
     download_links: Dict[str, List[str]] = {}
     
     try:
-        # Find all download link containers with rate IDs
-        # Pattern: <ul id="download_rate_XXX" ...> containing <a href="...">
-        rate_containers = soup.find_all('ul', id=re.compile(r'^download_rate_'))
+        # Method 1: Find <a> tags with download links
+        all_dcv_links = soup.find_all('a', href=re.compile(r'ftype=dcv'))
+        logging.debug(f"Found {len(all_dcv_links)} <a> dcv links in HTML for {cid}")
         
-        for container in rate_containers:
-            # Extract rate from id, e.g., "download_rate_10000" -> "10000"
-            container_id = str(container.get('id', ''))
-            rate_match = re.search(r'download_rate_(\w+)', container_id)
-            if not rate_match:
+        for link in all_dcv_links:
+            href = link.get('href')
+            if not href:
                 continue
             
-            rate = rate_match.group(1)
-            
-            # Find all download links in this container
-            links = container.find_all('a', attrs={'name': 'download'})
-            if not links:
-                links = container.find_all('a', href=re.compile(r'/proxy/=/product_id='))
-            
-            urls: List[str] = []
-            for link in links:
-                href = link.get('href')
-                if href and '/proxy/=' in str(href) and 'ftype=dcv' in str(href):
-                    urls.append(str(href))
-            
-            if urls:
-                # Map container rate to actual bitrate value from URL
-                url_rate_match = re.search(r'/rate=([^/]+)/', urls[0])
-                if url_rate_match:
-                    actual_rate = url_rate_match.group(1)
-                    download_links[actual_rate] = urls
-                    logging.debug(f"Found {len(urls)} download link(s) for rate {actual_rate} for {cid}")
+            href_str = str(href)
+            rate_match = re.search(r'/rate=([^/]+)/', href_str)
+            if rate_match:
+                rate = rate_match.group(1)
+                if rate not in download_links:
+                    download_links[rate] = []
+                
+                if href_str.startswith('/'):
+                    href_str = 'https://www.dmm.co.jp' + href_str
+                
+                if href_str not in download_links[rate]:
+                    download_links[rate].append(href_str)
         
-        # Also try to find standalone download links (for simpler page structures)
-        if not download_links:
-            all_links = soup.find_all('a', href=re.compile(r'/proxy/=/product_id=.*ftype=dcv'))
-            for link in all_links:
-                href = link.get('href')
-                if href:
-                    href_str = str(href)
-                    rate_match = re.search(r'/rate=([^/]+)/', href_str)
-                    if rate_match:
-                        rate = rate_match.group(1)
-                        if rate not in download_links:
-                            download_links[rate] = []
-                        if href_str not in download_links[rate]:
-                            download_links[rate].append(href_str)
+        if download_links:
+            logging.info(f"Found download links in <a> tags for {cid}: {list(download_links.keys())}")
+            return download_links
+        
+        # Method 2: Parse JavaScript data embedded in page
+        # Look for patterns like: product_id : 'esdx081dl7', rate : '4k', etc.
+        scripts = soup.find_all('script')
+        for script in scripts:
+            script_text = script.string if script.string else ''
+            if not script_text:
+                continue
+            
+            # Find all rate blocks with product_id and rate info
+            # Pattern matches: 10000 : { product_id : 'xxx', rate : 'yyy', ... }
+            # Note: \u005f is unicode escape for underscore
+            rate_blocks = re.findall(
+                r'(\d+)\s*:\s*\{[^}]*product(?:\\u005f|_)id\s*:\s*[\'"]([^\'"]+)[\'"][^}]*rate\s*:\s*[\'"]([^\'"]+)[\'"][^}]*\}',
+                script_text,
+                re.DOTALL
+            )
+            
+            if rate_blocks:
+                logging.debug(f"Found {len(rate_blocks)} rate blocks in JavaScript for {cid}")
+                for block_id, product_id, rate in rate_blocks:
+                    # Construct download URL
+                    download_url = f'https://www.dmm.co.jp/monthly/premium/-/proxy/=/product_id={product_id}/transfer_type=download/rate={rate}/drm=1/ftype=dcv'
+                    
+                    if rate not in download_links:
+                        download_links[rate] = []
+                    
+                    if download_url not in download_links[rate]:
+                        download_links[rate].append(download_url)
+                        logging.debug(f"Constructed download URL for rate {rate}: {download_url}")
+        
+        if download_links:
+            logging.info(f"Extracted download links from JavaScript for {cid}: {list(download_links.keys())}")
+        else:
+            logging.warning(f"No download links found in HTML for {cid}")
         
     except Exception as e:
         logging.error(f"Error extracting download links for {cid}: {e}")
@@ -705,27 +722,31 @@ def extract_download_links(soup: BeautifulSoup, cid: str) -> Dict[str, List[str]
 def select_best_download_link(download_links: Dict[str, List[str]]) -> Tuple[Optional[str], Optional[str]]:
     """Select the best quality download link from available options.
     
-    Priority: 4k > highest numeric bitrate
+    Priority: 4k > highest numeric bitrate (handles formats like '4000kb', '6000', etc.)
     Returns (url, bitrate) tuple.
     """
     if not download_links:
         return None, None
     
-    # Priority 1: 4K
-    if '4k' in download_links and download_links['4k']:
-        return download_links['4k'][0], '4k'
+    # Priority 1: 4K (check various formats)
+    for rate_key in download_links.keys():
+        if '4k' in rate_key.lower():
+            if download_links[rate_key]:
+                return download_links[rate_key][0], rate_key
     
-    # Priority 2: Highest numeric bitrate
-    numeric_rates = []
+    # Priority 2: Highest numeric bitrate (extract number from formats like '4000kb', '6000', etc.)
+    rate_values = []
     for rate in download_links.keys():
-        try:
-            numeric_rates.append(int(rate))
-        except ValueError:
-            pass
+        # Extract numeric part from rate string (e.g., '4000kb' -> 4000, '6000' -> 6000)
+        num_match = re.search(r'(\d+)', rate)
+        if num_match:
+            rate_values.append((int(num_match.group(1)), rate))
     
-    if numeric_rates:
-        best_rate = str(max(numeric_rates))
-        if best_rate in download_links and download_links[best_rate]:
+    if rate_values:
+        # Sort by numeric value descending, pick highest
+        rate_values.sort(key=lambda x: x[0], reverse=True)
+        best_rate = rate_values[0][1]
+        if download_links[best_rate]:
             return download_links[best_rate][0], best_rate
     
     # Fallback: return first available
@@ -756,12 +777,12 @@ def fetch_and_download_parts(cid: str, config: configparser.ConfigParser,
     try:
         soup = BeautifulSoup(response_page.text, 'lxml')
         
-        # Try to find download links directly from HTML
+        # Extract download links directly from HTML
         download_links = extract_download_links(soup, cid)
         
         if download_links:
             # Found download links in HTML - use them directly
-            logging.info(f"Found {len(download_links)} download link(s) in HTML for ID {cid}")
+            logging.info(f"Found {len(download_links)} bitrate option(s) in HTML for ID {cid}")
             
             # Select best quality link
             best_link, selected_bitrate = select_best_download_link(download_links)
@@ -798,150 +819,16 @@ def fetch_and_download_parts(cid: str, config: configparser.ConfigParser,
                 
                 logging.info(f"Successfully downloaded all {parts_count} part(s) for ID {cid}.")
                 return downloaded_files_list, parts_count
-        
-        # Fallback: Parse bitrate selector and construct URLs (old method)
-        logging.info(f"No download links found in HTML for {cid}, falling back to URL construction")
-        
-        # Get all available bitrate options and prioritize 4K
-        options = soup.select('select.js-downloadBitrate option')
-        bitrate = None
-        resolution_text = 'N/A'
-        
-        # First, check for 4K options
-        for opt in options:
-            val = opt.get('value')
-            text = opt.get_text().lower() if opt.get_text() else ''
-            if val and '4k' in text:
-                bitrate = val
-                resolution_text = opt.get_text()
-                logging.info(f"Found 4K option: {bitrate} ({resolution_text}) for ID {cid}")
-                break
-        
-        # If no 4K found, get the highest numerical bitrate
-        if not bitrate:
-            bitrates = []
-            for opt in options:
-                val = opt.get('value')
-                if val and isinstance(val, str) and val.isdigit():
-                    bitrates.append(int(val))
-            if bitrates:
-                max_bitrate = max(bitrates)
-                bitrate = str(max_bitrate)
-                max_option = soup.find('option', {'value': bitrate})
-                resolution_text = max_option.get_text() if max_option else 'N/A'
-                logging.info(f"Found max bitrate {bitrate} ({resolution_text}) for ID {cid}")
-        
-        if not bitrate:
-            logging.error(f"No valid bitrate options found for ID: {cid}. Page structure might have changed.")
-            body_start = soup.find('body')
-            logging.debug(f"HTML snippet near bitrate for {cid}: {str(body_start)[:1000] if body_start else 'No body tag found'}")
-            return None, None
-    except Exception as e:
-        logging.exception(f"Error parsing bitrate for ID {cid}")
-        return None, None
-
-    online_cid = get_online_cid(cid, headers_main, max_retries, retry_delay, proxies)
-    if not online_cid:
-        logging.warning(f"Could not determine online CID for {cid}. Using original ID {cid} for API calls.")
-        online_cid = cid
-
-    parts_count = get_movie_count(online_cid, headers_main, max_retries, retry_delay, proxies)
-    if parts_count == -1:
-        logging.error(f"Unable to retrieve the number of parts for ID: {cid} (using online ID: {online_cid}). Skipping download.")
-        return None, None
-    elif parts_count == 0:
-        logging.warning(f"API reported 0 parts for ID: {cid} (using online ID: {online_cid}). Skipping download.")
-        return [], 0
-    else:
-        logging.info(f"Expecting {parts_count} part(s) for ID {cid}")
-
-    try:
-        pid_suffix = None
-        bitrate_log_val = bitrate
-
-        if bitrate == '4k':
-            pid_suffix = 'dl7'
-        else:
-            try:
-                bitrate_val = int(str(bitrate))
-                if bitrate_val >= 4000:
-                    pid_suffix = 'dl6'
-                else:
-                    pid_suffix = 'dl'
-            except ValueError:
-                logging.error(f"Invalid non-'4k' bitrate value found for {cid}: {bitrate}. Cannot determine product ID.")
-                return None, None
-
-        if pid_suffix is None:
-             logging.error(f"Could not determine pid_suffix for bitrate '{bitrate}' for ID {cid}.")
-             return None, None
-
-        product_id_for_dl = online_cid + pid_suffix
-        logging.debug(f"Using product ID {product_id_for_dl} for download requests (Bitrate: {bitrate_log_val}).")
-
-    except Exception as e:
-        logging.exception(f"Error determining product ID suffix for {cid} with bitrate {bitrate}: {e}")
-        return None, None
-
-    # Build list of product IDs to try: with suffix first, then without (fallback for videoc storefront)
-    product_ids_to_try = [product_id_for_dl]
-    if pid_suffix and online_cid != product_id_for_dl:
-        product_ids_to_try.append(online_cid)  # Fallback: try without dl suffix
-
-    downloaded_files_list = []
-    all_parts_downloaded = True
-    successful_product_id = None
-    
-    for i in range(1, parts_count + 1):
-        part_suffix = f" Part {i}" if parts_count > 1 else ""
-        cid_part_label = f"{cid}{part_suffix}"
-        downloaded_file_path = None
-
-        # Try each product ID until one works
-        for try_product_id in product_ids_to_try:
-            base_download_url = f'https://www.dmm.co.jp/monthly/premium/-/proxy/=/product_id={try_product_id}/transfer_type=download/rate={bitrate}/drm=1/ftype=dcv'
-            part_download_url = base_download_url + (f'/part={i}' if parts_count > 1 else '')
-
-            # Ensure retry values are integers
-            safe_max_retries = max_retries if isinstance(max_retries, int) and max_retries is not None else 3
-            safe_retry_delay = retry_delay if isinstance(retry_delay, int) and retry_delay is not None else 5
-
-            logging.info(f"Trying product_id={try_product_id} for {cid_part_label}")
-            downloaded_file_path = download_dcv_file(
-                part_download_url, download_dir, cid_part_label,
-                headers_main, headers_download,
-                safe_max_retries, safe_retry_delay, config, proxies
-            )
-
-            if downloaded_file_path:
-                if successful_product_id is None:
-                    successful_product_id = try_product_id
-                    logging.info(f"Successfully using product_id={try_product_id} for {cid}")
-                break
             else:
-                logging.warning(f"product_id={try_product_id} failed for {cid_part_label}, trying next...")
-
-        if downloaded_file_path:
-            downloaded_files_list.append(downloaded_file_path)
+                logging.error(f"Could not select best download link for ID {cid}")
+                return None, None
         else:
-            logging.error(f"Download failed for {cid_part_label}. Aborting downloads for this ID.")
-            all_parts_downloaded = False
-            break
-
-    if all_parts_downloaded and len(downloaded_files_list) == parts_count:
-        logging.info(f"Successfully downloaded all {parts_count} part(s) for ID {cid}.")
-        return downloaded_files_list, parts_count
-    else:
-        expected_count_str = str(parts_count) if isinstance(parts_count, int) else "unknown"
-        logging.error(f"Incomplete download for ID {cid}. Expected {expected_count_str}, got {len(downloaded_files_list)}. Download success status: {all_parts_downloaded}")
-        if not all_parts_downloaded:
-            logging.info(f"Cleaning up partially downloaded files for failed ID {cid}")
-            for file_to_remove in downloaded_files_list:
-                 safe_remove(file_to_remove, "partial download cleanup")
-            return [], parts_count
-        else:
-            logging.warning(f"Logic error: Download reported success but part count mismatch for {cid}.")
-            return downloaded_files_list, parts_count
+            logging.error(f"No download links found in HTML for ID {cid}")
+            return None, None
+            
+    except Exception as e:
+        logging.exception(f"Error parsing page for ID {cid}")
+        return None, None
 
 
 # ---------------- DECRYPTION with Retry ----------------
