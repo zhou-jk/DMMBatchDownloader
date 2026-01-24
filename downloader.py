@@ -561,6 +561,7 @@ def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
                       max_retries: int, retry_delay: int, config: configparser.ConfigParser, proxies: Optional[Dict] = None) -> Optional[str]:
     """Gets the redirect location and downloads the .dcv file with a progress bar."""
     logging.info(f"Requesting download location for {cid_part_label}...")
+    logging.info(f"Download URL: {download_url}")
     location = None
     cid_context_loc = f"Download location for {cid_part_label}"
 
@@ -648,7 +649,7 @@ def extract_download_links(soup: BeautifulSoup, cid: str) -> Dict[str, List[str]
     If not found, parses JavaScript data to construct download URLs.
     
     Returns a dict mapping bitrate to list of download URLs for each part.
-    Example: {'4k': ['url1'], '4000': ['url1'], ...}
+    Example: {'4k': ['url_part1', 'url_part2'], '4000': ['url_part1', 'url_part2'], ...}
     """
     download_links: Dict[str, List[str]] = {}
     
@@ -680,37 +681,54 @@ def extract_download_links(soup: BeautifulSoup, cid: str) -> Dict[str, List[str]
             return download_links
         
         # Method 2: Parse JavaScript data embedded in page
-        # Look for patterns like: product_id : 'esdx081dl7', rate : '4k', etc.
+        # Look for patterns like: 3000 : { product_id : 'xxx', rate : 'yyy', volume : '2', ... }
         scripts = soup.find_all('script')
         for script in scripts:
             script_text = script.string if script.string else ''
             if not script_text:
                 continue
             
-            # Find all rate blocks with product_id and rate info
-            # Pattern matches: 10000 : { product_id : 'xxx', rate : 'yyy', ... }
-            # Note: \u005f is unicode escape for underscore
-            rate_blocks = re.findall(
-                r'(\d+)\s*:\s*\{[^}]*product(?:\\u005f|_)id\s*:\s*[\'"]([^\'"]+)[\'"][^}]*rate\s*:\s*[\'"]([^\'"]+)[\'"][^}]*\}',
-                script_text,
-                re.DOTALL
-            )
+            # Find all rate blocks: number : { ... }
+            # Use non-greedy match to capture each block
+            block_pattern = r'(\d+)\s*:\s*\{([^}]+)\}'
+            blocks = re.findall(block_pattern, script_text, re.DOTALL)
             
-            if rate_blocks:
-                logging.debug(f"Found {len(rate_blocks)} rate blocks in JavaScript for {cid}")
-                for block_id, product_id, rate in rate_blocks:
-                    # Construct download URL
-                    download_url = f'https://www.dmm.co.jp/monthly/premium/-/proxy/=/product_id={product_id}/transfer_type=download/rate={rate}/drm=1/ftype=dcv'
+            for block_id, block_content in blocks:
+                # Extract product_id from block (handles both \u005f and _ formats)
+                pid_match = re.search(r'product(?:\\u005f|_)id\s*:\s*[\'"]([^\'"]+)[\'"]', block_content)
+                # Extract rate from block
+                rate_match = re.search(r'(?<!_)rate\s*:\s*[\'"]([^\'"]+)[\'"]', block_content)
+                # Extract volume (number of parts) from block
+                volume_match = re.search(r'volume\s*:\s*[\'"]?(\d+)[\'"]?', block_content)
+                
+                if pid_match and rate_match:
+                    product_id = pid_match.group(1)
+                    rate = rate_match.group(1)
+                    volume = int(volume_match.group(1)) if volume_match else 1
                     
                     if rate not in download_links:
                         download_links[rate] = []
                     
-                    if download_url not in download_links[rate]:
-                        download_links[rate].append(download_url)
-                        logging.debug(f"Constructed download URL for rate {rate}: {download_url}")
+                    # Generate URLs for each part
+                    for part_num in range(1, volume + 1):
+                        if volume > 1:
+                            # Multiple parts - add part parameter
+                            download_url = f'https://www.dmm.co.jp/monthly/premium/-/proxy/=/product_id={product_id}/transfer_type=download/rate={rate}/part={part_num}/drm=1/ftype=dcv'
+                        else:
+                            # Single part - no part parameter needed
+                            download_url = f'https://www.dmm.co.jp/monthly/premium/-/proxy/=/product_id={product_id}/transfer_type=download/rate={rate}/drm=1/ftype=dcv'
+                        
+                        if download_url not in download_links[rate]:
+                            download_links[rate].append(download_url)
+                            logging.debug(f"Constructed download URL for rate {rate}, part {part_num}: {download_url}")
+            
+            if download_links:
+                break  # Found data, no need to check other scripts
         
         if download_links:
             logging.info(f"Extracted download links from JavaScript for {cid}: {list(download_links.keys())}")
+            for rate, urls in download_links.items():
+                logging.info(f"  Rate {rate}: {len(urls)} part(s)")
         else:
             logging.warning(f"No download links found in HTML for {cid}")
         
