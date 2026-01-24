@@ -279,6 +279,100 @@ def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
              safe_remove(str(output_file_path), "unexpected download error")
         return None
 
+def extract_download_links(soup: BeautifulSoup, cid: str) -> Dict[str, List[str]]:
+    """Extract download links directly from HTML page.
+    
+    Returns a dict mapping bitrate to list of download URLs for each part.
+    Example: {'4k': ['url1'], '6000': ['url1'], ...}
+    """
+    download_links: Dict[str, List[str]] = {}
+    
+    try:
+        # Find all download link containers with rate IDs
+        # Pattern: <ul id="download_rate_XXX" ...> containing <a href="...">
+        rate_containers = soup.find_all('ul', id=re.compile(r'^download_rate_'))
+        
+        for container in rate_containers:
+            # Extract rate from id, e.g., "download_rate_10000" -> "10000"
+            container_id = str(container.get('id', ''))
+            rate_match = re.search(r'download_rate_(\w+)', container_id)
+            if not rate_match:
+                continue
+            
+            rate = rate_match.group(1)
+            
+            # Find all download links in this container
+            links = container.find_all('a', attrs={'name': 'download'})
+            if not links:
+                links = container.find_all('a', href=re.compile(r'/proxy/=/product_id='))
+            
+            urls: List[str] = []
+            for link in links:
+                href = link.get('href')
+                if href and '/proxy/=' in str(href) and 'ftype=dcv' in str(href):
+                    urls.append(str(href))
+            
+            if urls:
+                # Map container rate to actual bitrate value from URL
+                url_rate_match = re.search(r'/rate=([^/]+)/', urls[0])
+                if url_rate_match:
+                    actual_rate = url_rate_match.group(1)
+                    download_links[actual_rate] = urls
+                    ThreadSafeLogger.debug(f"Found {len(urls)} download link(s) for rate {actual_rate} for {cid}")
+        
+        # Also try to find standalone download links (for simpler page structures)
+        if not download_links:
+            all_links = soup.find_all('a', href=re.compile(r'/proxy/=/product_id=.*ftype=dcv'))
+            for link in all_links:
+                href = link.get('href')
+                if href:
+                    href_str = str(href)
+                    rate_match = re.search(r'/rate=([^/]+)/', href_str)
+                    if rate_match:
+                        rate = rate_match.group(1)
+                        if rate not in download_links:
+                            download_links[rate] = []
+                        if href_str not in download_links[rate]:
+                            download_links[rate].append(href_str)
+        
+    except Exception as e:
+        ThreadSafeLogger.error(f"Error extracting download links for {cid}: {e}")
+    
+    return download_links
+
+def select_best_download_link(download_links: Dict[str, List[str]]) -> Tuple[Optional[str], Optional[str]]:
+    """Select the best quality download link from available options.
+    
+    Priority: 4k > highest numeric bitrate
+    Returns (url, bitrate) tuple.
+    """
+    if not download_links:
+        return None, None
+    
+    # Priority 1: 4K
+    if '4k' in download_links and download_links['4k']:
+        return download_links['4k'][0], '4k'
+    
+    # Priority 2: Highest numeric bitrate
+    numeric_rates = []
+    for rate in download_links.keys():
+        try:
+            numeric_rates.append(int(rate))
+        except ValueError:
+            pass
+    
+    if numeric_rates:
+        best_rate = str(max(numeric_rates))
+        if best_rate in download_links and download_links[best_rate]:
+            return download_links[best_rate][0], best_rate
+    
+    # Fallback: return first available
+    for rate, urls in download_links.items():
+        if urls:
+            return urls[0], rate
+    
+    return None, None
+
 def download_video_parts(task: IntegratedTask, temp_dir: str) -> bool:
     """Download all parts for a video ID to temporary directory"""
     cid = task.cid
@@ -305,6 +399,56 @@ def download_video_parts(task: IntegratedTask, temp_dir: str) -> bool:
 
     try:
         soup = BeautifulSoup(response_page.text, 'lxml')
+        
+        # Try to find download links directly from HTML
+        download_links = extract_download_links(soup, cid)
+        
+        if download_links:
+            # Found download links in HTML - use them directly
+            ThreadSafeLogger.info(f"Found {len(download_links)} download link(s) in HTML for ID {cid}")
+            
+            # Select best quality link
+            best_link, selected_bitrate = select_best_download_link(download_links)
+            if best_link and selected_bitrate:
+                ThreadSafeLogger.info(f"Selected bitrate: {selected_bitrate} for ID {cid}")
+                
+                # Get all parts for selected bitrate
+                part_links = download_links.get(selected_bitrate, [])
+                parts_count = len(part_links)
+                task.parts_count = parts_count
+                
+                if parts_count == 0:
+                    ThreadSafeLogger.error(f"No download links for selected bitrate {selected_bitrate} for ID {cid}")
+                    task.error_message = "No download links found"
+                    return False
+                
+                downloaded_files_list = []
+                for i, link in enumerate(part_links, 1):
+                    part_suffix = f" Part {i}" if parts_count > 1 else ""
+                    cid_part_label = f"{cid}{part_suffix}"
+                    
+                    downloaded_file_path = download_dcv_file(
+                        link, temp_dir, cid_part_label,
+                        headers_main, headers_download, max_retries, retry_delay, proxies
+                    )
+                    
+                    if downloaded_file_path:
+                        downloaded_files_list.append(downloaded_file_path)
+                    else:
+                        ThreadSafeLogger.error(f"Download failed for {cid_part_label}. Aborting downloads for this ID.")
+                        # Clean up partial downloads
+                        for file_to_remove in downloaded_files_list:
+                            safe_remove(file_to_remove, "partial download cleanup")
+                        task.error_message = f"Download failed for {cid_part_label}"
+                        return False
+                
+                ThreadSafeLogger.info(f"Successfully downloaded all {parts_count} part(s) for ID {cid}.")
+                task.downloaded_files = downloaded_files_list
+                return True
+        
+        # Fallback: Parse bitrate selector and construct URLs (old method)
+        ThreadSafeLogger.info(f"No download links found in HTML for {cid}, falling back to URL construction")
+        
         bitrate_select = soup.find('select', id='download_bitrate')
         selected_option = bitrate_select.find('option', selected=True) if bitrate_select else None
         if not selected_option and bitrate_select:
@@ -317,8 +461,8 @@ def download_video_parts(task: IntegratedTask, temp_dir: str) -> bool:
         bitrate = selected_option.get('value')
         ThreadSafeLogger.info(f"Found bitrate {bitrate} for ID {cid}")
     except Exception as e:
-        ThreadSafeLogger.error(f"Error parsing bitrate for ID {cid}: {e}")
-        task.error_message = f"Error parsing bitrate: {e}"
+        ThreadSafeLogger.error(f"Error parsing page for ID {cid}: {e}")
+        task.error_message = f"Error parsing page: {e}"
         return False
 
     online_cid = get_online_cid(cid, headers_main, max_retries, retry_delay, proxies)
