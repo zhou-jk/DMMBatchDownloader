@@ -85,7 +85,7 @@ failed_ids_file = failed_ids.txt     # Failed IDs tracking file
 #### [Network] Section
 ```ini
 user_agent = Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html) #Don't touch this, it's required to bypass VPN requirement.
-cookie = age_check_done=1; INT_SESID=YOUR-SESSION-ID; licenseUID=YOUR-LICENSE-ID  # **IMPORTANT: Replace with your actual DMM cookie values**
+cookie = age_check_done=1;INT_SESID=xxx;secid=xxx;login_secure_id=xxx;login_session_id=xxx;licenseUID=xxx  # **IMPORTANT: Replace XXX with your actual DMM cookie values**
 http_proxy =                         # HTTP proxy server (optional) - e.g., http://proxy.company.com:8080
 https_proxy =                        # HTTPS proxy server (optional) - e.g., https://proxy.company.com:8080
 ```
