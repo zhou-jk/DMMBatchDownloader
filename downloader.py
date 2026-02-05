@@ -125,7 +125,7 @@ def create_default_config(file_path: str):
     }
     default_config['Network'] = {
         'user_agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-        'cookie': 'age_check_done=1; example_key=example_value', # Simpler cookie value
+        'cookie': 'age_check_done=1;INT_SESID=xxx;secid=xxx;login_secure_id=xxx;login_session_id=xxx;licenseUID=xxx', # Cookie value
         'http_proxy': '',  # Proxy support re-added
         'https_proxy': '' # Proxy support re-added
     }
@@ -533,29 +533,53 @@ def get_movie_count(cid: str, headers: Dict,
         return -1
 
 def get_online_cid(cid: str, headers: Dict,
-                   max_retries: int, retry_delay: int, proxies: Optional[Dict] = None) -> Optional[str]:
-    """Retrieves the online ID ('item_variant') by parsing the video page JavaScript."""
+                   max_retries: int, retry_delay: int,
+                   proxies: Optional[Dict] = None) -> Optional[str]:
+    """
+    Retrieves the correct online CID by parsing the video page JavaScript.
+    Prefers product.id over item_variant and normalizes store variants (e.g. strips 'st').
+    """
     url = f'https://www.dmm.co.jp/monthly/premium/-/detail/=/cid={cid}/'
     cid_context = f"Online CID page for {cid}"
-    response = make_request("GET", url, headers, max_retries, retry_delay, cid_context, proxies=proxies)
+    response = make_request(
+        "GET", url, headers, max_retries, retry_delay, cid_context, proxies=proxies
+    )
 
-    if response:
-        try:
-            # Extract item_variant from JavaScript using regex
-            match = re.search(r'item_variant\s*:\s*"([^"]+)"', response.text)
-            if match:
-                item_variant = match.group(1)
-                logging.debug(f"Found item_variant {item_variant} for {cid}")
-                return item_variant
-            else:
-                logging.warning(f"item_variant not found in JavaScript for {cid}")
-                return None
-        except Exception as e:
-            logging.exception(f"Error parsing online CID page for {cid}")
-            return None
-    else:
+    if not response:
         return None
 
+    try:
+        text = response.text
+
+        # Prefer product.id (this is the real downloadable CID)
+        id_match = re.search(r'\bid\s*:\s*"([^"]+)"', text)
+        if id_match:
+            real_cid = id_match.group(1)
+            logging.debug(f"Found product.id {real_cid} for {cid}")
+            return real_cid
+
+        # Fallback to item_variant
+        variant_match = re.search(r'item_variant\s*:\s*"([^"]+)"', text)
+        if variant_match:
+            item_variant = variant_match.group(1)
+
+            # Normalize store variants
+            if item_variant.endswith("st"):
+                normalized = item_variant[:-2]
+                logging.debug(
+                    f"Normalized item_variant {item_variant} → {normalized} for {cid}"
+                )
+                return normalized
+
+            logging.debug(f"Using item_variant {item_variant} for {cid}")
+            return item_variant
+
+        logging.warning(f"No product.id or item_variant found for {cid}")
+        return None
+
+    except Exception:
+        logging.exception(f"Error parsing online CID page for {cid}")
+        return None
 
 def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
                       headers_main: Dict, headers_download: Dict,
