@@ -1208,6 +1208,11 @@ def main():
         'User-Agent': network['user_agent'],
         'cookie': network['cookie']
     }
+    # Add X-Forwarded-For header if configured
+    x_forwarded_for = network.get('x_forwarded_for', '').strip()
+    if x_forwarded_for:
+        headers_main['X-Forwarded-For'] = x_forwarded_for
+        logging.info(f"Using X-Forwarded-For: {x_forwarded_for}")
     headers_download = {
         'User-Agent': network['user_agent']
     }
