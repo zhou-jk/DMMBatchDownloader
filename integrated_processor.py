@@ -230,10 +230,10 @@ def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
         output_file_path = Path(output_dir) / filename
         ThreadSafeLogger.info(f"Starting download: {filename} -> {output_file_path}")
 
-        # Download from content delivery network
+        # Download from content delivery network (no proxy needed, uses X-Forwarded-For)
         cid_context_dl = f"File download for {cid_part_label}"
         r_dl = make_request("GET", location, headers_download, max_retries, retry_delay,
-                            cid_context_dl, stream=True, timeout=300, proxies=proxies)
+                            cid_context_dl, stream=True, timeout=300, proxies=None)
         if not r_dl:
             return None
 
@@ -987,6 +987,8 @@ def main():
     headers_download = {
         'User-Agent': network['user_agent']
     }
+    if x_forwarded_for:
+        headers_download['X-Forwarded-For'] = x_forwarded_for
     
     # Setup proxy configuration
     proxies = {}
