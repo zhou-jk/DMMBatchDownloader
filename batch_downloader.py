@@ -275,36 +275,36 @@ def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
     ThreadSafeLogger.info(f"Requesting download location for {cid_part_label}...")
     ThreadSafeLogger.info(f"Download URL: {download_url}")
     
-    # Follow redirects manually until we get the final download URL
-    current_url = download_url
-    max_redirects = 5
+    # Redirect #1: dmm.co.jp/proxy/... -> str.dmm.com/... (with proxy)
+    cid_context_r1 = f"Redirect #1 for {cid_part_label}"
+    response_r1 = make_request("GET", download_url, headers_main, max_retries, retry_delay,
+                               cid_context_r1, allow_redirects=False, timeout=60, proxies=proxies)
     
-    for redirect_num in range(1, max_redirects + 1):
-        cid_context_loc = f"Redirect #{redirect_num} for {cid_part_label}"
-        response_loc = make_request("GET", current_url, headers_main, max_retries, retry_delay,
-                                    cid_context_loc, allow_redirects=False, timeout=60, proxies=proxies)
-        
-        if response_loc and 300 <= response_loc.status_code < 400:
-            location = response_loc.headers.get('Location')
-            if location:
-                ThreadSafeLogger.info(f"Redirect #{redirect_num} for {cid_part_label}: {location[:120]}...")
-                current_url = location
-            else:
-                ThreadSafeLogger.error(f"Redirect #{redirect_num} for {cid_part_label}: no 'Location' header found.")
-                return None
-        elif response_loc and 200 <= response_loc.status_code < 300:
-            # Got a direct 200 response - unlikely but handle it
-            ThreadSafeLogger.info(f"Got direct response (no redirect) at step #{redirect_num} for {cid_part_label}")
-            break
-        elif response_loc:
-            ThreadSafeLogger.error(f"Unexpected status {response_loc.status_code} at redirect #{redirect_num} for {cid_part_label}.")
-            return None
-        else:
-            ThreadSafeLogger.error(f"Failed to get response at redirect #{redirect_num} for {cid_part_label}.")
-            return None
+    if not response_r1 or not (300 <= response_r1.status_code < 400):
+        status = response_r1.status_code if response_r1 else 'No response'
+        ThreadSafeLogger.error(f"Redirect #1 failed for {cid_part_label}: {status}")
+        return None
     
-    # current_url is now the final download URL (stcXXX.dmm.com)
-    final_url = current_url
+    url_r1 = response_r1.headers.get('Location')
+    if not url_r1:
+        ThreadSafeLogger.error(f"Redirect #1 for {cid_part_label}: no 'Location' header found.")
+        return None
+    ThreadSafeLogger.info(f"Redirect #1 for {cid_part_label}: {url_r1[:120]}...")
+    
+    # Redirect #2: str.dmm.com/... -> stcXXX.dmm.com/... (with proxy)
+    cid_context_r2 = f"Redirect #2 for {cid_part_label}"
+    response_r2 = make_request("GET", url_r1, headers_main, max_retries, retry_delay,
+                               cid_context_r2, allow_redirects=False, timeout=60, proxies=proxies)
+    
+    if not response_r2 or not (300 <= response_r2.status_code < 400):
+        status = response_r2.status_code if response_r2 else 'No response'
+        ThreadSafeLogger.error(f"Redirect #2 failed for {cid_part_label}: {status}")
+        return None
+    
+    final_url = response_r2.headers.get('Location')
+    if not final_url:
+        ThreadSafeLogger.error(f"Redirect #2 for {cid_part_label}: no 'Location' header found.")
+        return None
     ThreadSafeLogger.info(f"Final download URL for {cid_part_label}: {final_url[:120]}...")
 
     try:
