@@ -247,6 +247,7 @@ def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
             filename = f"{cid_part_label.replace(' ', '_').replace(':', '_')}.dcv"
 
         output_file_path = Path(output_dir) / filename
+        temp_file_path = Path(output_dir) / (filename + '.tmp')
         ThreadSafeLogger.info(f"Starting download: {filename} -> {output_file_path}")
 
         # Download from final CDN URL (no proxy needed, uses X-Forwarded-For)
@@ -261,7 +262,8 @@ def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
         chunk_size = 8192
 
         try:
-            with open(output_file_path, 'wb') as f_dl, \
+            # Download to temp file first, rename after verification
+            with open(temp_file_path, 'wb') as f_dl, \
                  tqdm(total=total_size, unit='B', unit_scale=True, unit_divisor=1024,
                       desc=filename, ascii=True, miniters=1, leave=False) as progress_bar:
                 for chunk in r_dl.iter_content(chunk_size=chunk_size):
@@ -269,34 +271,41 @@ def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
                         f_dl.write(chunk)
                         progress_bar.update(len(chunk))
 
-            final_size = safe_getsize(str(output_file_path))
+            final_size = safe_getsize(str(temp_file_path))
             if final_size is None:
                 ThreadSafeLogger.error(f"Download completed for {cid_part_label}, but couldn't get final file size.")
-                safe_remove(str(output_file_path), "incomplete download")
+                safe_remove(str(temp_file_path), "incomplete download")
                 return None
             elif total_size is not None and final_size < total_size:
                 ThreadSafeLogger.error(f"Download incomplete for {cid_part_label}: Expected {total_size} bytes, got {final_size} bytes.")
-                safe_remove(str(output_file_path), "incomplete download")
+                safe_remove(str(temp_file_path), "incomplete download")
                 return None
             elif final_size == 0:
-                ThreadSafeLogger.error(f"Download for {cid_part_label} resulted in an empty file: {output_file_path}")
-                safe_remove(str(output_file_path), "empty download")
+                ThreadSafeLogger.error(f"Download for {cid_part_label} resulted in an empty file.")
+                safe_remove(str(temp_file_path), "empty download")
                 return None
             else:
+                # Verification passed - rename temp file to final name
+                try:
+                    temp_file_path.replace(output_file_path)
+                except OSError as e:
+                    ThreadSafeLogger.error(f"Failed to rename temp file to {output_file_path}: {e}")
+                    safe_remove(str(temp_file_path), "rename failed")
+                    return None
                 ThreadSafeLogger.info(f"Download completed successfully for {cid_part_label}: {output_file_path} ({final_size} bytes)")
                 return str(output_file_path)
 
         except OSError as e:
             ThreadSafeLogger.error(f"File system error during download for {cid_part_label}: {e}")
-            safe_remove(str(output_file_path), "filesystem error")
+            safe_remove(str(temp_file_path), "filesystem error")
             return None
         finally:
             r_dl.close()
 
     except Exception as e:
         ThreadSafeLogger.error(f"Unexpected error during file download or handling for {cid_part_label}: {e}")
-        if 'output_file_path' in locals() and output_file_path.exists():
-             safe_remove(str(output_file_path), "unexpected download error")
+        if 'temp_file_path' in locals() and temp_file_path.exists():
+             safe_remove(str(temp_file_path), "unexpected download error")
         return None
 
 def extract_download_links(soup: BeautifulSoup, cid: str) -> Dict[str, List[str]]:
@@ -808,9 +817,17 @@ def process_integrated_task(task: IntegratedTask) -> bool:
     ThreadSafeLogger.info(f"=== Starting Integrated Processing for ID: {cid} ===")
     
     try:
+        # Determine custom temp base directory from config (avoids /tmp on small root partitions)
+        custom_temp_base = task.config['Paths'].get('temp_dir', '').strip()
+        if custom_temp_base:
+            custom_temp_base = expand_user_path(custom_temp_base)
+            Path(custom_temp_base).mkdir(parents=True, exist_ok=True)
+        else:
+            custom_temp_base = None  # Use system default /tmp
+        
         # Use output_dir for decryption if in local mode, otherwise use temp_dir
         if rclone_enabled:
-            temp_context = TemporaryDirectory(prefix=f"integrated_{cid}_")
+            temp_context = TemporaryDirectory(prefix=f"integrated_{cid}_", dir=custom_temp_base)
             temp_dir = temp_context.__enter__()
             decrypt_output_dir = temp_dir
         else:
@@ -822,7 +839,7 @@ def process_integrated_task(task: IntegratedTask) -> bool:
         try:
             # Use a temp dir for downloads even in local mode
             if temp_dir is None:
-                download_temp = TemporaryDirectory(prefix=f"download_{cid}_")
+                download_temp = TemporaryDirectory(prefix=f"download_{cid}_", dir=custom_temp_base)
                 download_dir = download_temp.__enter__()
             else:
                 download_temp = None

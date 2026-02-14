@@ -154,7 +154,8 @@ def create_default_config(file_path: str):
         'log_file_all': 'process_all.log',
         'log_file_errors': 'process_errors.log',
         'failed_ids_file': 'failed_ids.txt',
-        'dcv_files_dir': './dcv_files'
+        'dcv_files_dir': './dcv_files',
+        'temp_dir': ''
     }
     default_config['Network'] = {
         'user_agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
