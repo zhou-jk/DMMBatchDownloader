@@ -730,7 +730,7 @@ def extract_download_links(soup: BeautifulSoup, cid: str) -> Dict[str, List[str]
                 volume_match = re.search(r'volume\s*:\s*[\'"]?(\d+)[\'"]?', block_content)
                 
                 if pid_match and rate_match:
-                    product_id = pid_match.group(1)
+                    product_id = pid_match.group(1).replace('\\u005f', '_').replace('\u005f', '_')
                     rate = rate_match.group(1)
                     volume = int(volume_match.group(1)) if volume_match else 1
                     
