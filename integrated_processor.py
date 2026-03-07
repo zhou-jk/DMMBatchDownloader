@@ -97,6 +97,7 @@ class IntegratedTask:
         self.error_message = ""
         self.start_time = None
         self.end_time = None
+        self._has_corrupt_files = False
         
     def __str__(self):
         return f"IntegratedTask({self.cid}, {self.status.value})"
@@ -529,11 +530,18 @@ def download_video_parts(task: IntegratedTask, temp_dir: str) -> bool:
 # ---------------- DECRYPTION FUNCTIONS ----------------
 
 def decrypt_dcv_file(dcv_file_path: str, output_dir: str, decrypt_tool_path: str, 
-                    max_retries: int, decrypt_retry_delay: int) -> Optional[str]:
-    """Decrypt a single .dcv file with verification and retry logic."""
+                    max_retries: int, decrypt_retry_delay: int) -> Tuple[Optional[str], str]:
+    """Decrypt a single .dcv file with verification and retry logic.
+    
+    Returns:
+        (output_path, failure_reason) tuple:
+        - Success: (mkv_path, 'success')
+        - Corrupt/incomplete file: (None, 'corrupt') - dcv should be deleted
+        - Decryption tool error: (None, 'decrypt_error') - dcv should be kept
+    """
     if not Path(dcv_file_path).exists():
         ThreadSafeLogger.error(f"DCV file not found: {dcv_file_path}")
-        return None
+        return None, 'corrupt'
 
     # Prepare output path
     base_name = Path(dcv_file_path).stem
@@ -546,8 +554,8 @@ def decrypt_dcv_file(dcv_file_path: str, output_dir: str, decrypt_tool_path: str
     # Pre-decryption conformance check
     ThreadSafeLogger.info(f"Performing conformance check on {Path(dcv_file_path).name}...")
     if has_conformance_errors(dcv_file_path):
-        ThreadSafeLogger.error(f"Conformance check failed for {Path(dcv_file_path).name}. File is likely corrupt.")
-        return None
+        ThreadSafeLogger.error(f"Conformance check failed for {Path(dcv_file_path).name}. File is likely corrupt/incomplete.")
+        return None, 'corrupt'
 
     # Decryption command
     cmd = [decrypt_tool_path, "decrypt", "-i", dcv_file_path, "-o", str(output_mkv_path), "-t", "dmm"]
@@ -576,11 +584,11 @@ def decrypt_dcv_file(dcv_file_path: str, output_dir: str, decrypt_tool_path: str
                         should_retry = True
                     else:
                         ThreadSafeLogger.error(error_msg + " Max retries reached.")
-                        return None
+                        return None, 'decrypt_error'
                 else:
                     ThreadSafeLogger.error(error_msg)
                     ThreadSafeLogger.error(f"Stderr:\n{result.stderr}")
-                    return None
+                    return None, 'decrypt_error'
 
                 if not should_retry:
                     break
@@ -594,17 +602,17 @@ def decrypt_dcv_file(dcv_file_path: str, output_dir: str, decrypt_tool_path: str
                 else:
                     ThreadSafeLogger.warning(f"Decryption command finished with code 0 for {Path(dcv_file_path).name} (Attempt {attempt + 1}), but success message not found.")
                     ThreadSafeLogger.warning(f"Stderr:\n{result.stderr}")
-                    return None
+                    return None, 'decrypt_error'
 
         except subprocess.TimeoutExpired:
             ThreadSafeLogger.error(f"Decryption timeout for {Path(dcv_file_path).name} on attempt {attempt + 1}")
-            return None
+            return None, 'decrypt_error'
         except FileNotFoundError:
             ThreadSafeLogger.critical(f"Decryption executable '{decrypt_tool_path}' not found.")
-            return None
+            return None, 'decrypt_error'
         except Exception as e:
             ThreadSafeLogger.error(f"Error running decryption command for {Path(dcv_file_path).name} on attempt {attempt + 1}: {e}")
-            return None
+            return None, 'decrypt_error'
 
         if should_retry:
             time.sleep(decrypt_retry_delay)
@@ -612,7 +620,7 @@ def decrypt_dcv_file(dcv_file_path: str, output_dir: str, decrypt_tool_path: str
     # Verify decryption output
     if not output_mkv_path.exists():
         ThreadSafeLogger.error(f"Decryption reported success but output file not found: {output_mkv_path}")
-        return None
+        return None, 'decrypt_error'
 
     # Size verification with variable tolerance
     size_in = safe_getsize(dcv_file_path)
@@ -621,7 +629,7 @@ def decrypt_dcv_file(dcv_file_path: str, output_dir: str, decrypt_tool_path: str
     if size_in is None or size_out is None:
         ThreadSafeLogger.error(f"Could not get file sizes to verify {Path(dcv_file_path).name}. Deleting output.")
         safe_remove(str(output_mkv_path), "size verification failed")
-        return None
+        return None, 'corrupt'
 
     if size_in > 0:
         MB_500 = 500 * 1024 * 1024
@@ -643,7 +651,7 @@ def decrypt_dcv_file(dcv_file_path: str, output_dir: str, decrypt_tool_path: str
         if size_ratio < required_ratio:
             ThreadSafeLogger.error(f"Size mismatch for {Path(dcv_file_path).name}: Ratio {size_ratio:.4f} is less than required {required_ratio}.")
             safe_remove(str(output_mkv_path), "size mismatch")
-            return None
+            return None, 'corrupt'
         else:
             ThreadSafeLogger.info(f"Size check passed for {output_mkv_path.name} (Ratio: {size_ratio:.4f}, Required: {required_ratio})")
     
@@ -655,18 +663,18 @@ def decrypt_dcv_file(dcv_file_path: str, output_dir: str, decrypt_tool_path: str
     if dcv_duration is None or mkv_duration is None:
         ThreadSafeLogger.error(f"Could not get MediaInfo duration for '{Path(dcv_file_path).name}' or its output. Verification failed.")
         safe_remove(str(output_mkv_path), "duration check failed")
-        return None
+        return None, 'corrupt'
     
     duration_diff = abs(dcv_duration - mkv_duration)
     if duration_diff > 30.0:
         ThreadSafeLogger.error(f"Duration mismatch for {Path(dcv_file_path).name}: DCV={dcv_duration:.2f}s, MKV={mkv_duration:.2f}s (Difference: {duration_diff:.2f}s > 6s)")
         safe_remove(str(output_mkv_path), "duration mismatch")
-        return None
+        return None, 'corrupt'
     else:
         ThreadSafeLogger.info(f"Duration check passed for {output_mkv_path.name} (Difference: {duration_diff:.2f}s)")
         
     ThreadSafeLogger.info(f"✅ Decryption and verification successful for {Path(dcv_file_path).name}")
-    return str(output_mkv_path)
+    return str(output_mkv_path), 'success'
 
 def decrypt_video_parts(task: IntegratedTask, temp_dir: str) -> bool:
     """Decrypt all downloaded DCV files to MKV format"""
@@ -689,11 +697,12 @@ def decrypt_video_parts(task: IntegratedTask, temp_dir: str) -> bool:
 
     decrypted_files = []
     all_parts_decrypted = True
+    has_corrupt_files = False
 
     for dcv_file_path in task.downloaded_files:
         ThreadSafeLogger.info(f"Decrypting {Path(dcv_file_path).name} for ID {task.cid}...")
         
-        decrypted_mkv_path = decrypt_dcv_file(
+        decrypted_mkv_path, failure_reason = decrypt_dcv_file(
             dcv_file_path, temp_dir, decrypt_tool_path, max_retries, decrypt_retry_delay
         )
         
@@ -701,7 +710,12 @@ def decrypt_video_parts(task: IntegratedTask, temp_dir: str) -> bool:
             decrypted_files.append(decrypted_mkv_path)
             ThreadSafeLogger.info(f"Successfully decrypted {Path(dcv_file_path).name}")
         else:
-            ThreadSafeLogger.error(f"Failed to decrypt {Path(dcv_file_path).name}")
+            ThreadSafeLogger.error(f"Failed to decrypt {Path(dcv_file_path).name} (reason: {failure_reason})")
+            if failure_reason == 'corrupt':
+                has_corrupt_files = True
+                # Delete corrupt/incomplete .dcv file immediately
+                ThreadSafeLogger.info(f"Deleting corrupt/incomplete file: {Path(dcv_file_path).name}")
+                safe_remove(dcv_file_path, "corrupt/incomplete dcv")
             all_parts_decrypted = False
             break
 
@@ -711,7 +725,14 @@ def decrypt_video_parts(task: IntegratedTask, temp_dir: str) -> bool:
         return True
     else:
         ThreadSafeLogger.error(f"Decryption failed for ID {task.cid}. Expected {len(task.downloaded_files)}, got {len(decrypted_files)}")
-        task.error_message = f"Decryption failed: expected {len(task.downloaded_files)}, got {len(decrypted_files)}"
+        if has_corrupt_files:
+            task.error_message = f"Decryption failed (corrupt/incomplete dcv): expected {len(task.downloaded_files)}, got {len(decrypted_files)}"
+            # Mark that corrupt files were found, so process_integrated_task
+            # knows to delete remaining dcv files instead of moving them
+            task._has_corrupt_files = True
+        else:
+            task.error_message = f"Decryption failed (tool error): expected {len(task.downloaded_files)}, got {len(decrypted_files)}"
+            task._has_corrupt_files = False
         # Clean up any successfully decrypted files
         for mkv_file in decrypted_files:
             safe_remove(mkv_file, "partial decryption cleanup")
@@ -825,96 +846,108 @@ def process_integrated_task(task: IntegratedTask) -> bool:
         else:
             custom_temp_base = None  # Use system default /tmp
         
+        failed_dir = expand_user_path(task.config['Paths'].get('failed_dir', './failed'))
+        Path(failed_dir).mkdir(parents=True, exist_ok=True)
+        
         # Use output_dir for decryption if in local mode, otherwise use temp_dir
         if rclone_enabled:
             temp_context = TemporaryDirectory(prefix=f"integrated_{cid}_", dir=custom_temp_base)
             temp_dir = temp_context.__enter__()
+            download_dir = temp_dir
             decrypt_output_dir = temp_dir
         else:
             temp_context = None
             temp_dir = None
+            # In local mode: download to download_dir (persistent), decrypt to output_dir
+            download_dir = expand_user_path(task.config['Paths'].get('download_dir', './downloaded'))
+            Path(download_dir).mkdir(parents=True, exist_ok=True)
             decrypt_output_dir = task.output_dir
             Path(decrypt_output_dir).mkdir(parents=True, exist_ok=True)
         
         try:
-            # Use a temp dir for downloads even in local mode
-            if temp_dir is None:
-                download_temp = TemporaryDirectory(prefix=f"download_{cid}_", dir=custom_temp_base)
-                download_dir = download_temp.__enter__()
-            else:
-                download_temp = None
-                download_dir = temp_dir
+            ThreadSafeLogger.debug(f"Using download directory: {download_dir}")
+            ThreadSafeLogger.debug(f"Using decrypt output directory: {decrypt_output_dir}")
             
-            try:
-                ThreadSafeLogger.debug(f"Using download directory: {download_dir}")
-                ThreadSafeLogger.debug(f"Using decrypt output directory: {decrypt_output_dir}")
-                
-                # Check disk space
-                if not check_disk_space(download_dir, 10.0):
-                    ThreadSafeLogger.error(f"Insufficient disk space in temporary directory for ID {cid}")
-                    task.error_message = "Insufficient disk space"
-                    update_processing_stats('fail_download')
-                    return False
-                
-                # Phase 1: Download
-                ThreadSafeLogger.info(f"Phase 1/{phase_count}: Downloading DCV files for ID {cid}")
-                task.status = TaskStatus.DOWNLOADING
-                update_processing_stats('start_download')
-                
-                if not download_video_parts(task, download_dir):
-                    ThreadSafeLogger.error(f"Download phase failed for ID {cid}")
-                    update_processing_stats('fail_download')
-                    task.status = TaskStatus.FAILED
-                    return False
-                
-                # Handle special case where video has 0 parts
-                if task.parts_count == 0:
-                    ThreadSafeLogger.info(f"ID {cid} has 0 parts. Marking as completed.")
-                    update_processing_stats('complete')
-                    task.status = TaskStatus.COMPLETED
-                    return True
-                
-                # Phase 2: Decrypt
-                ThreadSafeLogger.info(f"Phase 2/{phase_count}: Decrypting DCV files for ID {cid}")
-                task.status = TaskStatus.DECRYPTING
-                update_processing_stats('finish_download')
-                
-                if not decrypt_video_parts(task, decrypt_output_dir):
-                    ThreadSafeLogger.error(f"Decryption phase failed for ID {cid}")
-                    update_processing_stats('fail_decrypt')
-                    task.status = TaskStatus.FAILED
-                    return False
-                
-                # Phase 3: Upload (only if rclone is configured)
-                if rclone_enabled:
-                    ThreadSafeLogger.info(f"Phase 3/{phase_count}: Uploading MKV files for ID {cid}")
-                    task.status = TaskStatus.UPLOADING
-                    update_processing_stats('finish_decrypt')
-                    
-                    if not upload_video_parts(task):
-                        ThreadSafeLogger.error(f"Upload phase failed for ID {cid}")
-                        update_processing_stats('fail_upload')
-                        task.status = TaskStatus.FAILED
-                        return False
-                else:
-                    ThreadSafeLogger.info(f"Skipping upload - files saved to: {decrypt_output_dir}")
-                    update_processing_stats('finish_decrypt')
-                
-                # Success
-                ThreadSafeLogger.info(f"✅ All phases completed successfully for ID {cid}")
+            # Check disk space
+            if not check_disk_space(download_dir, 10.0):
+                ThreadSafeLogger.error(f"Insufficient disk space in download directory for ID {cid}")
+                task.error_message = "Insufficient disk space"
+                update_processing_stats('fail_download')
+                return False
+            
+            # Phase 1: Download
+            ThreadSafeLogger.info(f"Phase 1/{phase_count}: Downloading DCV files for ID {cid}")
+            task.status = TaskStatus.DOWNLOADING
+            update_processing_stats('start_download')
+            
+            if not download_video_parts(task, download_dir):
+                ThreadSafeLogger.error(f"Download phase failed for ID {cid}")
+                update_processing_stats('fail_download')
+                task.status = TaskStatus.FAILED
+                return False
+            
+            # Handle special case where video has 0 parts
+            if task.parts_count == 0:
+                ThreadSafeLogger.info(f"ID {cid} has 0 parts. Marking as completed.")
                 update_processing_stats('complete')
                 task.status = TaskStatus.COMPLETED
-                task.end_time = datetime.now()
-                
-                # Log processing time
-                duration = task.end_time - task.start_time
-                ThreadSafeLogger.info(f"Processing time for ID {cid}: {duration}")
-                
                 return True
             
-            finally:
-                if download_temp is not None:
-                    download_temp.__exit__(None, None, None)
+            # Phase 2: Decrypt
+            ThreadSafeLogger.info(f"Phase 2/{phase_count}: Decrypting DCV files for ID {cid}")
+            task.status = TaskStatus.DECRYPTING
+            update_processing_stats('finish_download')
+            
+            if not decrypt_video_parts(task, decrypt_output_dir):
+                ThreadSafeLogger.error(f"Decryption phase failed for ID {cid}")
+                update_processing_stats('fail_decrypt')
+                task.status = TaskStatus.FAILED
+                # Handle remaining .dcv files based on failure reason
+                if not rclone_enabled and task.downloaded_files:
+                    remaining_dcv = [f for f in task.downloaded_files if Path(f).exists()]
+                    if remaining_dcv:
+                        if getattr(task, '_has_corrupt_files', False):
+                            # Corrupt/incomplete files - delete all remaining dcv files
+                            ThreadSafeLogger.info(f"Deleting {len(remaining_dcv)} remaining .dcv file(s) for ID {cid} (corrupt/incomplete)")
+                            for dcv_path in remaining_dcv:
+                                safe_remove(dcv_path, "corrupt batch cleanup")
+                        else:
+                            # Decrypt tool error - move dcv files to failed_dir for later retry
+                            ThreadSafeLogger.info(f"Moving {len(remaining_dcv)} .dcv file(s) to {failed_dir} for ID {cid} (decrypt tool error)")
+                            move_files(remaining_dcv, failed_dir, cid)
+                return False
+            
+            # Decryption succeeded - clean up .dcv files (no longer needed)
+            if not rclone_enabled and task.downloaded_files:
+                for dcv_path in task.downloaded_files:
+                    safe_remove(dcv_path, "post-decryption cleanup")
+            
+            # Phase 3: Upload (only if rclone is configured)
+            if rclone_enabled:
+                ThreadSafeLogger.info(f"Phase 3/{phase_count}: Uploading MKV files for ID {cid}")
+                task.status = TaskStatus.UPLOADING
+                update_processing_stats('finish_decrypt')
+                
+                if not upload_video_parts(task):
+                    ThreadSafeLogger.error(f"Upload phase failed for ID {cid}")
+                    update_processing_stats('fail_upload')
+                    task.status = TaskStatus.FAILED
+                    return False
+            else:
+                ThreadSafeLogger.info(f"Skipping upload - files saved to: {decrypt_output_dir}")
+                update_processing_stats('finish_decrypt')
+            
+            # Success
+            ThreadSafeLogger.info(f"✅ All phases completed successfully for ID {cid}")
+            update_processing_stats('complete')
+            task.status = TaskStatus.COMPLETED
+            task.end_time = datetime.now()
+            
+            # Log processing time
+            duration = task.end_time - task.start_time
+            ThreadSafeLogger.info(f"Processing time for ID {cid}: {duration}")
+            
+            return True
         
         finally:
             if temp_context is not None:
