@@ -204,7 +204,7 @@ def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
     Follows multiple redirects manually:
     1. dmm.co.jp/proxy/... -> str.dmm.com/... (with proxy)
     2. str.dmm.com/... -> stcXXX.dmm.com/... (with proxy)
-    3. Download from stcXXX.dmm.com (no proxy, uses X-Forwarded-For)
+    3. Download from stcXXX.dmm.com (with proxy)
     """
     ThreadSafeLogger.info(f"Requesting download location for {cid_part_label}...")
     ThreadSafeLogger.info(f"Download URL: {download_url}")
@@ -251,10 +251,10 @@ def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
         temp_file_path = Path(output_dir) / (filename + '.tmp')
         ThreadSafeLogger.info(f"Starting download: {filename} -> {output_file_path}")
 
-        # Download from final CDN URL (no proxy needed, uses X-Forwarded-For)
+        # Download from final CDN URL (via proxy)
         cid_context_dl = f"File download for {cid_part_label}"
         r_dl = make_request("GET", final_url, headers_download, max_retries, retry_delay,
-                            cid_context_dl, stream=True, timeout=300, proxies=None)
+                            cid_context_dl, stream=True, timeout=300, proxies=proxies)
         if not r_dl:
             return None
 
@@ -1048,16 +1048,9 @@ def main():
         'User-Agent': network['user_agent'],
         'cookie': network['cookie']
     }
-    # Add X-Forwarded-For header if configured
-    x_forwarded_for = network.get('x_forwarded_for', '').strip()
-    if x_forwarded_for:
-        headers_main['X-Forwarded-For'] = x_forwarded_for
-        ThreadSafeLogger.info(f"Using X-Forwarded-For: {x_forwarded_for}")
     headers_download = {
         'User-Agent': network['user_agent']
     }
-    if x_forwarded_for:
-        headers_download['X-Forwarded-For'] = x_forwarded_for
     
     # Setup proxy configuration
     proxies = {}
