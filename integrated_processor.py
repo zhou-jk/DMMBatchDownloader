@@ -78,7 +78,7 @@ class IntegratedTask:
     
     def __init__(self, cid: str, config, headers_main: Dict, headers_download: Dict, 
                  decrypt_tool_path: str, rclone_config: Optional[Dict] = None, proxies: Optional[Dict] = None,
-                 output_dir: Optional[str] = None):
+                 output_dir: Optional[str] = None, download_proxies: Optional[Dict] = None):
         self.cid = cid
         self.config = config
         self.headers_main = headers_main
@@ -86,6 +86,7 @@ class IntegratedTask:
         self.decrypt_tool_path = decrypt_tool_path
         self.rclone_config = rclone_config
         self.proxies = proxies
+        self.download_proxies = download_proxies  # Dedicated proxy for the file download step
         self.output_dir = output_dir  # Local output directory when rclone is not configured
         
         # Task state
@@ -198,13 +199,18 @@ def get_online_cid(cid: str, headers: Dict, max_retries: int, retry_delay: int,
 
 def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
                       headers_main: Dict, headers_download: Dict,
-                      max_retries: int, retry_delay: int, proxies: Optional[Dict] = None) -> Optional[str]:
+                      max_retries: int, retry_delay: int, proxies: Optional[Dict] = None,
+                      download_proxies: Optional[Dict] = None) -> Optional[str]:
     """Get the redirect location and download the .dcv file with a progress bar.
-    
+
     Follows multiple redirects manually:
     1. dmm.co.jp/proxy/... -> str.dmm.com/... (with proxy)
     2. str.dmm.com/... -> stcXXX.dmm.com/... (with proxy)
-    3. Download from stcXXX.dmm.com (with proxy)
+    3. Download from stcXXX.dmm.com (with download_proxies)
+
+    Redirect resolution always uses the main `proxies`. The final (large) file
+    transfer uses `download_proxies`: when it is not configured the download
+    goes out directly (no proxy), instead of falling back to the main proxy.
     """
     ThreadSafeLogger.info(f"Requesting download location for {cid_part_label}...")
     ThreadSafeLogger.info(f"Download URL: {download_url}")
@@ -254,7 +260,7 @@ def download_dcv_file(download_url: str, output_dir: str, cid_part_label: str,
         # Download from final CDN URL (via proxy)
         cid_context_dl = f"File download for {cid_part_label}"
         r_dl = make_request("GET", final_url, headers_download, max_retries, retry_delay,
-                            cid_context_dl, stream=True, timeout=300, proxies=proxies)
+                            cid_context_dl, stream=True, timeout=300, proxies=download_proxies)
         if not r_dl:
             return None
 
@@ -448,7 +454,8 @@ def download_video_parts(task: IntegratedTask, temp_dir: str) -> bool:
     headers_main = task.headers_main
     headers_download = task.headers_download
     proxies = task.proxies
-    
+    download_proxies = task.download_proxies
+
     paths = config['Paths']
     settings = config['Settings']
     max_retries = settings.getint('max_retries', fallback=3)
@@ -497,7 +504,8 @@ def download_video_parts(task: IntegratedTask, temp_dir: str) -> bool:
                     
                     downloaded_file_path = download_dcv_file(
                         link, temp_dir, cid_part_label,
-                        headers_main, headers_download, max_retries, retry_delay, proxies
+                        headers_main, headers_download, max_retries, retry_delay, proxies,
+                        download_proxies
                     )
                     
                     if downloaded_file_path:
@@ -1062,7 +1070,18 @@ def main():
         ThreadSafeLogger.info(f"Using proxy configuration: {proxies}")
     else:
         proxies = None
-    
+
+    # Dedicated proxy for the final video file download only.
+    # If 'download_proxy' is not configured, the file download goes out directly
+    # (no proxy) instead of using the main proxy above.
+    download_proxies = None
+    download_proxy_url = network.get('download_proxy', '').strip()
+    if download_proxy_url:
+        download_proxies = {'http': download_proxy_url, 'https': download_proxy_url}
+        ThreadSafeLogger.info(f"Using dedicated download proxy: {download_proxies}")
+    else:
+        ThreadSafeLogger.info("No dedicated download proxy configured - file downloads will go out directly (no proxy)")
+
     # Read IDs to process
     ids_to_process = read_ids_from_file(paths['ids_file'])
     if not ids_to_process:
@@ -1088,8 +1107,9 @@ def main():
     # Create integrated tasks
     integrated_tasks = []
     for cid in ids_to_process:
-        task = IntegratedTask(cid, config, headers_main, headers_download, 
-                             decrypt_tool_path, rclone_config, proxies, output_dir)
+        task = IntegratedTask(cid, config, headers_main, headers_download,
+                             decrypt_tool_path, rclone_config, proxies, output_dir,
+                             download_proxies)
         integrated_tasks.append(task)
     
     # Execute integrated processing with thread pool
